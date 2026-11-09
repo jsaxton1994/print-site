@@ -14,11 +14,56 @@ if (!$user) {
     exit('User not found');
 }
 
+// Handle Form Submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $action = post_value('action') ?? 'update';
 
-    // Handle Delete User
+    // 1. Send Email Template
+    if ($action === 'send_template') {
+        $templateId = (int)post_value('template_id');
+        $stmtTpl = db()->prepare('SELECT * FROM email_templates WHERE id = ? LIMIT 1');
+        $stmtTpl->bind_param('i', $templateId);
+        $stmtTpl->execute();
+        $tpl = $stmtTpl->get_result()->fetch_assoc();
+
+        if (!$tpl) {
+            flash('error', 'Selected email template was not found.');
+            redirect('/admin/user.php?id=' . $id);
+        }
+
+        $placeholders = [
+            'email'     => $user['email'],
+            'role'      => $user['role'],
+            'status'    => $user['status'],
+            'login_url' => '/'
+        ];
+
+        $sent = false;
+        // If template_key is a recognised notice key, dispatch via send_notice
+        if (!empty($tpl['template_key']) && function_exists('send_notice')) {
+            $sent = send_notice($tpl['template_key'], $user['email'], $placeholders);
+        }
+
+        // Fallback: If send_notice returned false or custom template not registered in send_notice
+        if (!$sent && function_exists('send_mail')) {
+            $body = $tpl['body'];
+            foreach ($placeholders as $k => $v) {
+                $body = str_replace('{{' . $k . '}}', $v, $body);
+            }
+            $sent = send_mail($user['email'], $tpl['subject'], $body);
+        }
+
+        if ($sent) {
+            flash('success', 'Email "' . e($tpl['name']) . '" sent to ' . e($user['email']) . '.');
+        } else {
+            flash('error', 'Could not send the email template. Check mail configuration settings.');
+        }
+
+        redirect('/admin/user.php?id=' . $id);
+    }
+
+    // 2. Delete User
     if ($action === 'delete') {
         if ($id === (int)$actor['id']) {
             flash('error', 'You cannot delete your own administrator account.');
@@ -38,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Handle Update Role / Status
+    // 3. Update User Role & Status
     $role   = post_value('role');
     $status = post_value('status');
 
@@ -57,7 +102,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $stmt->bind_param('ssi', $role, $status, $id);
     $stmt->execute();
 
-    if ($old !== $status) {
+    if ($old !== $status && function_exists('send_notice')) {
         send_notice($status === 'Suspended' ? 'account_suspended' : 'account_unsuspended', $user['email'], ['email' => $user['email']]);
     }
 
@@ -65,10 +110,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect('/admin/user.php?id=' . $id);
 }
 
+// Fetch Job Stats
 $stmt = db()->prepare('SELECT status, COUNT(*) count FROM jobs WHERE user_id = ? GROUP BY status');
 $stmt->bind_param('i', $id);
 $stmt->execute();
 $jobs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Fetch Available Email Templates
+$templatesQuery = db()->query('SELECT id, name, subject, is_default FROM email_templates ORDER BY is_default DESC, name ASC');
+$templates = $templatesQuery ? $templatesQuery->fetch_all(MYSQLI_ASSOC) : [];
 
 render_header('User Details', 'admin');
 page_title('User details', 'Review this account and update access.');
@@ -137,6 +187,33 @@ page_title('User details', 'Review this account and update access.');
 
             <button class="button button-admin button-wide">Save changes</button>
         </form>
+
+        <hr style="margin: 24px 0; border: 0; border-top: 1px solid var(--border-color, #e2e8f0);">
+
+        <div class="eyebrow">NOTIFICATIONS</div>
+        <h3 style="margin: 6px 0 4px; font-size: 1.1rem;">Send email template</h3>
+        <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">Select and send an email template directly to this user.</p>
+
+        <?php if (empty($templates)): ?>
+            <p class="muted" style="font-size: 0.85rem;">No email templates available.</p>
+        <?php else: ?>
+            <form method="post" class="form-stack" onsubmit="return confirm('Send this email template to <?= e($user['email']) ?>?');">
+                <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
+                <input type="hidden" name="action" value="send_template">
+
+                <label>Template
+                    <select name="template_id" required>
+                        <?php foreach ($templates as $tpl): ?>
+                            <option value="<?= (int)$tpl['id'] ?>">
+                                <?= e($tpl['name']) ?> (<?= $tpl['is_default'] ? 'System' : 'Custom' ?>)
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+
+                <button class="button button-soft button-wide">Send template email</button>
+            </form>
+        <?php endif; ?>
 
         <hr style="margin: 24px 0; border: 0; border-top: 1px solid var(--border-color, #e2e8f0);">
 
