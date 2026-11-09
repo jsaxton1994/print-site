@@ -29,7 +29,7 @@ function get_password_column_name(): ?string {
     while ($row = $res->fetch_assoc()) {
         $columns[] = strtolower($row['Field']);
     }
-    // Check possible column names in order of likelihood
+    // Check candidate column names
     foreach (['password_hash', 'password', 'pass', 'passwd', 'pwd', 'user_password'] as $candidate) {
         if (in_array($candidate, $columns, true)) {
             $colName = $candidate;
@@ -70,7 +70,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($needsPassword) {
             $pwdCol = get_password_column_name();
             if ($pwdCol) {
-                // Generate a random 10-character temporary password
                 $plainPassword = bin2hex(random_bytes(5));
                 $hashed = password_hash($plainPassword, PASSWORD_DEFAULT);
 
@@ -93,7 +92,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'date'      => date('Y-m-d')
         ];
 
-        // Replacement function supporting spacing variants like {{ email }} or {{email}}
         $replaceTags = function (string $text) use ($placeholders): string {
             return preg_replace_callback('/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/', function ($matches) use ($placeholders) {
                 $key = strtolower($matches[1]);
@@ -125,10 +123,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('/admin/user.php?id=' . $id);
     }
 
-    // 2. Delete User
+    // 2. Delete User (Protected against deleting ANY Admin)
     if ($action === 'delete') {
-        if ($id === (int)$actor['id']) {
-            flash('error', 'You cannot delete your own administrator account.');
+        if ($user['role'] === 'Admin') {
+            flash('error', 'Administrator accounts cannot be deleted.');
             redirect('/admin/user.php?id=' . $id);
         }
 
@@ -281,13 +279,26 @@ page_title('User details', 'Review this account and update access.');
 
         <div class="eyebrow" style="color: #dc2626;">DANGER ZONE</div>
         <h3 style="margin: 6px 0 4px; font-size: 1.1rem;">Delete account</h3>
-        <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">Permanently remove this user account. This action cannot be undone.</p>
 
-        <form method="post" onsubmit="return confirm('Are you sure you want to permanently delete this user? This cannot be undone.');">
-            <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
-            <input type="hidden" name="action" value="delete">
-            <button class="button button-danger button-wide" style="background: #dc2626; color: #ffffff; border: none; cursor: pointer;">Delete user</button>
-        </form>
+        <?php if ($user['role'] === 'Admin'): ?>
+            <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">
+                Administrator accounts are protected and cannot be deleted. Demote this user to <strong>User</strong> first if removal is required.
+            </p>
+            <button type="button" class="button button-danger button-wide" disabled style="opacity: 0.5; cursor: not-allowed; background: #94a3b8; color: #ffffff; border: none;">
+                Delete protected (Admin)
+            </button>
+        <?php else: ?>
+            <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">
+                Permanently remove this user account. This action cannot be undone.
+            </p>
+            <form method="post" onsubmit="return confirm('Are you sure you want to permanently delete this user? This cannot be undone.');">
+                <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
+                <input type="hidden" name="action" value="delete">
+                <button class="button button-danger button-wide" style="background: #dc2626; color: #ffffff; border: none; cursor: pointer;">
+                    Delete user
+                </button>
+            </form>
+        <?php endif; ?>
     </aside>
 </div>
 
