@@ -1,0 +1,2 @@
+- close jobs view after submitting job.
+- fix job submitting, when submitting jobs it doesn't submit to admins side (pending jobs).

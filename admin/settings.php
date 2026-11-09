@@ -8,9 +8,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $section = post_value('section');
 
     if ($section === 'printer') {
-        $paper   = post_value('paper_size');
-        $colour  = post_value('colour_options');
-        $address = post_value('printer_email');
+        $paper       = post_value('paper_size');
+        $colour      = post_value('colour_options');
+        $address     = post_value('printer_email');
+        $allowClient = post_value('allow_client_settings') === '0' ? '0' : '1';
 
         if (!in_array($paper, ['A4', 'A3', 'Letter', 'Legal', '4x6'], true) ||
             !in_array($colour, ['Colour', 'Black & White'], true) ||
@@ -22,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         set_setting('paper_size', $paper);
         set_setting('colour_options', $colour);
         set_setting('printer_email', $address);
+        set_setting('allow_client_settings', $allowClient);
         flash('success', 'Epson printer settings saved.');
     } elseif ($section === 'mail') {
         $from       = trim((string)post_value('mail_from'));
@@ -82,21 +84,30 @@ page_title('Settings Management', 'Configure printer delivery and application co
             <span class="settings-icon orange">▣</span>
             <div>
                 <h2>Epson Printer Settings</h2>
-                <p>Defaults applied to new client print requests.</p>
+                <p>Defaults and client submission preferences for print requests.</p>
             </div>
         </div>
         <form method="post" class="settings-form">
             <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
             <input type="hidden" name="section" value="printer">
+
+            <label>Client job submission options
+                <select name="allow_client_settings">
+                    <option value="1" <?=setting('allow_client_settings', '1') === '1' ? 'selected' : ''?>>Allow client to choose paper size & colour mode</option>
+                    <option value="0" <?=setting('allow_client_settings', '1') === '0' ? 'selected' : ''?>>Lock client to default settings below</option>
+                </select>
+                <small>Choose whether clients can select their own print settings or use fixed admin defaults.</small>
+            </label>
+
             <div class="field-row">
-                <label>Paper size
+                <label>Default paper size
                     <select name="paper_size">
                         <?php foreach (['A4', 'A3', 'Letter', 'Legal', '4x6'] as $o): ?>
                             <option <?=$o === setting('paper_size', 'A4') ? 'selected' : ''?>><?=e($o)?></option>
                         <?php endforeach; ?>
                     </select>
                 </label>
-                <label>Colour options
+                <label>Default colour options
                     <select name="colour_options">
                         <?php foreach (['Colour', 'Black & White'] as $o): ?>
                             <option <?=$o === setting('colour_options', 'Colour') ? 'selected' : ''?>><?=e($o)?></option>
@@ -104,10 +115,12 @@ page_title('Settings Management', 'Configure printer delivery and application co
                     </select>
                 </label>
             </div>
+
             <label>Epson Email Print address
                 <input type="email" name="printer_email" value="<?=e(setting('printer_email'))?>" placeholder="printer@print.epsonconnect.com">
                 <small>Approved jobs are emailed as an attachment; print settings are included in the subject and message.</small>
             </label>
+
             <button class="button button-admin">Save printer settings</button>
         </form>
     </section>
