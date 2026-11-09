@@ -1,0 +1,4 @@
+Options -Indexes
+<FilesMatch "^(database\.sql|README\.md|\.env|\.gitignore|\.user\.ini)$">
+  Require all denied
+</FilesMatch>

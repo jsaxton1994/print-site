@@ -1,0 +1,3 @@
+/* Admin shares the portal layout; admin tone is purple. */
+@import url('/client/public/css/app.css');
+:root{--orange:#7556dc;--orange-dark:#6344ca}
