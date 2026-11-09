@@ -14,7 +14,7 @@ if (!$user) {
     exit('User not found');
 }
 
-// Helper to determine the actual password column name in your users table
+// Detect password column dynamically in the users table
 function get_password_column_name(): ?string {
     static $colName = false;
     if ($colName !== false) {
@@ -29,7 +29,6 @@ function get_password_column_name(): ?string {
     while ($row = $res->fetch_assoc()) {
         $columns[] = strtolower($row['Field']);
     }
-    // Check candidate column names
     foreach (['password_hash', 'password', 'pass', 'passwd', 'pwd', 'user_password'] as $candidate) {
         if (in_array($candidate, $columns, true)) {
             $colName = $candidate;
@@ -45,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $action = post_value('action') ?? 'update';
 
-    // 1. Send Email Template with Working Placeholders
+    // 1. Send Email Template with Dynamic Placeholders
     if ($action === 'send_template') {
         $templateId = (int)post_value('template_id');
         $stmtTpl = db()->prepare('SELECT * FROM email_templates WHERE id = ? LIMIT 1');
@@ -58,12 +57,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/admin/user.php?id=' . $id);
         }
 
-        // Detect current base URL for login_url
         $isHttps  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || ($_SERVER['SERVER_PORT'] ?? 80) == 443;
         $host     = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $loginUrl = ($isHttps ? 'https://' : 'http://') . $host . '/login.php';
 
-        // Check if template asks for a password tag
         $needsPassword = (bool)preg_match('/\{\{\s*password\s*\}\}/i', $tpl['subject'] . ' ' . $tpl['body']);
         $plainPassword = '';
 
@@ -81,7 +78,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        // Placeholders dictionary
         $placeholders = [
             'email'     => $user['email'],
             'login_url' => $loginUrl,
@@ -123,7 +119,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('/admin/user.php?id=' . $id);
     }
 
-    // 2. Delete User (Protected against deleting ANY Admin)
+    // 2. Delete User (Admin Protected)
     if ($action === 'delete') {
         if ($user['role'] === 'Admin') {
             flash('error', 'Administrator accounts cannot be deleted.');
