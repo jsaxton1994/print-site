@@ -14,12 +14,38 @@ if (!$user) {
     exit('User not found');
 }
 
+// Helper to determine the actual password column name in your users table
+function get_password_column_name(): ?string {
+    static $colName = false;
+    if ($colName !== false) {
+        return $colName;
+    }
+    $res = db()->query("SHOW COLUMNS FROM users");
+    if (!$res) {
+        $colName = null;
+        return null;
+    }
+    $columns = [];
+    while ($row = $res->fetch_assoc()) {
+        $columns[] = strtolower($row['Field']);
+    }
+    // Check possible column names in order of likelihood
+    foreach (['password_hash', 'password', 'pass', 'passwd', 'pwd', 'user_password'] as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            $colName = $candidate;
+            return $colName;
+        }
+    }
+    $colName = null;
+    return null;
+}
+
 // Handle Form Submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $action = post_value('action') ?? 'update';
 
-    // 1. Send Email Template
+    // 1. Send Email Template with Working Placeholders
     if ($action === 'send_template') {
         $templateId = (int)post_value('template_id');
         $stmtTpl = db()->prepare('SELECT * FROM email_templates WHERE id = ? LIMIT 1');
@@ -32,32 +58,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/admin/user.php?id=' . $id);
         }
 
-        $placeholders = [
-            'email'     => $user['email'],
-            'role'      => $user['role'],
-            'status'    => $user['status'],
-            'login_url' => '/'
-        ];
+        // Detect current base URL for login_url
+        $isHttps  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || ($_SERVER['SERVER_PORT'] ?? 80) == 443;
+        $host     = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $loginUrl = ($isHttps ? 'https://' : 'http://') . $host . '/login.php';
 
-        $sent = false;
-        // If template_key is a recognised notice key, dispatch via send_notice
-        if (!empty($tpl['template_key']) && function_exists('send_notice')) {
-            $sent = send_notice($tpl['template_key'], $user['email'], $placeholders);
+        // Check if template asks for a password tag
+        $needsPassword = (bool)preg_match('/\{\{\s*password\s*\}\}/i', $tpl['subject'] . ' ' . $tpl['body']);
+        $plainPassword = '';
+
+        if ($needsPassword) {
+            $pwdCol = get_password_column_name();
+            if ($pwdCol) {
+                // Generate a random 10-character temporary password
+                $plainPassword = bin2hex(random_bytes(5));
+                $hashed = password_hash($plainPassword, PASSWORD_DEFAULT);
+
+                $stmtPwd = db()->prepare("UPDATE users SET `{$pwdCol}` = ? WHERE id = ?");
+                $stmtPwd->bind_param('si', $hashed, $id);
+                $stmtPwd->execute();
+            } else {
+                $plainPassword = '[Unavailable - check DB schema]';
+            }
         }
 
-        // Fallback: If send_notice returned false or custom template not registered in send_notice
-        if (!$sent && function_exists('send_mail')) {
-            $body = $tpl['body'];
-            foreach ($placeholders as $k => $v) {
-                $body = str_replace('{{' . $k . '}}', $v, $body);
-            }
-            $sent = send_mail($user['email'], $tpl['subject'], $body);
+        // Placeholders dictionary
+        $placeholders = [
+            'email'     => $user['email'],
+            'login_url' => $loginUrl,
+            'password'  => $plainPassword,
+            'role'      => $user['role'],
+            'status'    => $user['status'],
+            'user_id'   => (string)$user['id'],
+            'date'      => date('Y-m-d')
+        ];
+
+        // Replacement function supporting spacing variants like {{ email }} or {{email}}
+        $replaceTags = function (string $text) use ($placeholders): string {
+            return preg_replace_callback('/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/', function ($matches) use ($placeholders) {
+                $key = strtolower($matches[1]);
+                return array_key_exists($key, $placeholders) ? (string)$placeholders[$key] : $matches[0];
+            }, $text);
+        };
+
+        $renderedSubject = $replaceTags($tpl['subject']);
+        $renderedBody    = $replaceTags($tpl['body']);
+
+        $sent = false;
+
+        if (function_exists('send_mail')) {
+            $sent = send_mail($user['email'], $renderedSubject, $renderedBody);
+        } elseif (function_exists('send_notice')) {
+            $sent = send_notice($tpl['template_key'] ?: 'custom_notification', $user['email'], $placeholders);
         }
 
         if ($sent) {
-            flash('success', 'Email "' . e($tpl['name']) . '" sent to ' . e($user['email']) . '.');
+            $msg = 'Email "' . e($tpl['name']) . '" sent to ' . e($user['email']) . '.';
+            if ($needsPassword && $plainPassword !== '') {
+                $msg .= ' A temporary password was generated and included in the email.';
+            }
+            flash('success', $msg);
         } else {
-            flash('error', 'Could not send the email template. Check mail configuration settings.');
+            flash('error', 'Could not send the email. Please check your SMTP settings in Settings Management.');
         }
 
         redirect('/admin/user.php?id=' . $id);
@@ -192,7 +254,7 @@ page_title('User details', 'Review this account and update access.');
 
         <div class="eyebrow">NOTIFICATIONS</div>
         <h3 style="margin: 6px 0 4px; font-size: 1.1rem;">Send email template</h3>
-        <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">Select and send an email template directly to this user.</p>
+        <p class="muted" style="font-size: 0.85rem; margin-top: 0; margin-bottom: 14px;">Tags like <code>{{email}}</code>, <code>{{login_url}}</code>, and <code>{{password}}</code> are replaced automatically.</p>
 
         <?php if (empty($templates)): ?>
             <p class="muted" style="font-size: 0.85rem;">No email templates available.</p>

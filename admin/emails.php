@@ -37,7 +37,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $existing = $stmt->get_result()->fetch_assoc();
 
             if ($existing) {
-                // If it's a default template, preserve the system name; otherwise allow rename
                 $name = $existing['is_default'] ? $existing['name'] : substr(post_value('name') ?: $subject, 0, 120);
 
                 $stmt = db()->prepare('UPDATE email_templates SET name = ?, subject = ?, body = ? WHERE id = ?');
@@ -99,7 +98,7 @@ page_title('Emails Management', 'Review notification templates and custom messag
         <a class="modal-close" href="/admin/emails.php">×</a>
         <div class="eyebrow">CUSTOM MESSAGE</div>
         <h2>Create email template</h2>
-        <p class="muted">Custom templates are saved for reference and future workflows.</p>
+        <p class="muted">Available dynamic tags: <code>{{email}}</code>, <code>{{login_url}}</code>, <code>{{password}}</code>, <code>{{role}}</code></p>
         <form method="post" class="form-stack">
             <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
             <input type="hidden" name="action" value="custom">
@@ -111,7 +110,7 @@ page_title('Emails Management', 'Review notification templates and custom messag
                 <input name="subject" required placeholder="Email subject">
             </label>
             <label>Body
-                <textarea name="body" rows="6" required placeholder="Write the email message..."></textarea>
+                <textarea name="body" rows="6" required placeholder="Hello {{email}},&#10;&#10;Your login link: {{login_url}}&#10;Your password: {{password}}"></textarea>
             </label>
             <button class="button button-admin button-wide">Save custom template</button>
         </form>
@@ -125,7 +124,7 @@ page_title('Emails Management', 'Review notification templates and custom messag
             <a class="modal-close" href="/admin/emails.php">×</a>
             <div class="eyebrow"><?= $t['is_default'] ? 'SYSTEM NOTIFICATION' : 'CUSTOM MESSAGE' ?></div>
             <h2>Edit email template</h2>
-            <p class="muted">Update the subject line and notification message.</p>
+            <p class="muted">Available dynamic tags: <code>{{email}}</code>, <code>{{login_url}}</code>, <code>{{password}}</code>, <code>{{role}}</code></p>
 
             <form method="post" class="form-stack">
                 <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
