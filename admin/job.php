@@ -114,7 +114,7 @@ page_title('Job details', 'Review the request and update its print status.');
         <?php if (is_file($path)): ?>
             <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-top:1rem;">
                 <a class="button button-soft" href="/download.php?id=<?= (int)$job['id'] ?>">↓ Download Attachment</a>
-                <a class="button button-soft" href="/download.php?id=<?= (int)$job['id'] ?>&preview=1" target="_blank">👁 Preview Attachment</a>
+                <button type="button" class="button button-soft" onclick="openPreviewModal()">👁 Preview Attachment</button>
             </div>
         <?php endif; ?>
     </div>
@@ -144,5 +144,44 @@ page_title('Job details', 'Review the request and update its print status.');
         <a class="back-link" href="/admin/jobs.php">← Back to jobs</a>
     </aside>
 </div>
+
+<!-- Modal Viewer for in-browser preview -->
+<div id="previewModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:99999; align-items:center; justify-content:center; padding:1.5rem;">
+    <div style="background:#fff; width:100%; max-width:1050px; height:90vh; border-radius:12px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 20px 40px rgba(0,0,0,0.3);">
+        <div style="padding:0.75rem 1.25rem; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e5e7eb; background:#f9fafb;">
+            <strong style="font-size:1rem;"><?= e($job['original_name']) ?></strong>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <a href="/download.php?id=<?= (int)$job['id'] ?>&preview=1" target="_blank" class="button button-sm button-soft" style="text-decoration:none;">Open in new tab ↗</a>
+                <button type="button" class="button button-sm" onclick="closePreviewModal()" style="cursor:pointer; background:#e5e7eb; border:none; border-radius:6px; padding:0.25rem 0.65rem;">✕ Close</button>
+            </div>
+        </div>
+        <div style="flex:1; background:#525659; overflow:hidden;">
+            <iframe id="previewIframe" src="" style="width:100%; height:100%; border:none;"></iframe>
+        </div>
+    </div>
+</div>
+
+<script>
+function openPreviewModal() {
+    const modal = document.getElementById('previewModal');
+    const iframe = document.getElementById('previewIframe');
+    iframe.src = '/download.php?id=<?= (int)$job['id'] ?>&preview=1';
+    modal.style.display = 'flex';
+}
+
+function closePreviewModal() {
+    const modal = document.getElementById('previewModal');
+    const iframe = document.getElementById('previewIframe');
+    iframe.src = '';
+    modal.style.display = 'none';
+}
+
+// Close when clicking outside the modal window
+document.getElementById('previewModal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closePreviewModal();
+    }
+});
+</script>
 
 <?php render_footer(); ?>

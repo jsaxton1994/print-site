@@ -166,11 +166,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect('/admin/user.php?id=' . $id);
 }
 
-// Fetch Job Stats
-$stmt = db()->prepare('SELECT status, COUNT(*) count FROM jobs WHERE user_id = ? GROUP BY status');
-$stmt->bind_param('i', $id);
-$stmt->execute();
-$jobs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+// Fetch All User Jobs
+$stmtJobs = db()->prepare('SELECT * FROM jobs WHERE user_id = ? ORDER BY created_at DESC');
+$stmtJobs->bind_param('i', $id);
+$stmtJobs->execute();
+$userJobs = $stmtJobs->get_result()->fetch_all(MYSQLI_ASSOC);
 
 // Fetch Available Email Templates
 $templatesQuery = db()->query('SELECT id, name, subject, is_default FROM email_templates ORDER BY is_default DESC, name ASC');
@@ -206,16 +206,47 @@ page_title('User details', 'Review this account and update access.');
 
         <div class="detail-note">
             <small>JOB ACTIVITY</small>
-            <div class="mini-stats">
-                <?php if (!$jobs): ?>
-                    <span>No submitted jobs yet.</span>
-                <?php else: foreach ($jobs as $s): ?>
-                    <span><?= status_badge($s['status']) ?> <strong><?= (int)$s['count'] ?></strong></span>
-                <?php endforeach; endif; ?>
-            </div>
+
+            <?php if (empty($userJobs)): ?>
+                <p style="margin-top: 0.5rem; color: var(--text-muted, #777);">No submitted jobs yet.</p>
+            <?php else: ?>
+                <div class="table-wrap" style="margin-top: 0.75rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; overflow-x: auto;">
+                    <table style="width: 100%; font-size: 0.875rem;">
+                        <thead>
+                            <tr>
+                                <th>Job ID</th>
+                                <th>Document</th>
+                                <th>Submitted</th>
+                                <th>Settings</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($userJobs as $j): ?>
+                                <tr>
+                                    <td>#<?= str_pad((string)$j['id'], 5, '0', STR_PAD_LEFT) ?></td>
+                                    <td>
+                                        <strong><?= e($j['original_name']) ?></strong>
+                                        <small style="display:block; color:var(--text-muted, #777);"><?= number_format($j['file_size'] / 1024, 0) ?> KB</small>
+                                    </td>
+                                    <td><?= e(date('M j, Y · g:i a', strtotime($j['created_at']))) ?></td>
+                                    <td><?= e($j['paper_size']) ?> · <?= e($j['colour_mode']) ?></td>
+                                    <td><?= status_badge($j['status']) ?></td>
+                                    <td>
+                                        <a class="button button-sm button-soft" href="/admin/job.php?id=<?= (int)$j['id'] ?>">Inspect</a>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
         </div>
 
-        <a class="button button-soft" href="/admin/users.php">← Back to users</a>
+        <div style="margin-top: 1.5rem;">
+            <a class="button button-soft" href="/admin/users.php">← Back to users</a>
+        </div>
     </div>
 
     <aside class="action-card">
