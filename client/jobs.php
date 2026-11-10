@@ -31,7 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/client/jobs.php#new-job');
         }
 
-        // Determine settings (allow client selection if enabled, otherwise fallback to admin defaults)
+        // Determine settings
         if ($allowClientSettings && in_array(post_value('paper_size'), $paperOptions, true)) {
             $paper = post_value('paper_size');
         } else {
@@ -47,7 +47,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $copies = 1;
         $notes  = substr((string)post_value('notes'), 0, 500);
 
+        // Ensure storage directory exists
+        $uploadDir = __DIR__ . '/../storage/uploads';
+        if (!is_dir($uploadDir)) {
+            @mkdir($uploadDir, 0777, true);
+        }
+
         $extensions = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'tif', 'tiff', 'bmp', 'doc', 'docx', 'odt', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'];
+        $mimeMap = [
+            'pdf'  => 'application/pdf',
+            'png'  => 'image/png',
+            'jpg'  => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'gif'  => 'image/gif',
+            'tif'  => 'image/tiff',
+            'tiff' => 'image/tiff',
+            'bmp'  => 'image/bmp',
+            'doc'  => 'application/msword',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'odt'  => 'application/vnd.oasis.opendocument.text',
+            'xls'  => 'application/vnd.ms-excel',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'ppt'  => 'application/vnd.ms-powerpoint',
+            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'txt'  => 'text/plain'
+        ];
+
         $added = 0;
 
         for ($i = 0; $i < $count; $i++) {
@@ -57,65 +82,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'tmp_name' => $files['tmp_name'][$i] ?? ''
             ];
 
+            if ($file['error'] !== UPLOAD_ERR_OK || $file['size'] <= 0) {
+                continue;
+            }
+
+            if (function_exists('allowed_upload') && !allowed_upload($file)) {
+                continue;
+            }
+
             $original = basename((string)$names[$i]);
             $ext      = strtolower(pathinfo($original, PATHINFO_EXTENSION));
 
-            if (!allowed_upload($file) || !in_array($ext, $extensions, true)) {
+            if (!in_array($ext, $extensions, true)) {
                 continue;
             }
 
-            $finfo    = new finfo(FILEINFO_MIME_TYPE);
-            $detected = $finfo->file($file['tmp_name']) ?: '';
-
-            $mimeExtensions = [
-                'pdf'  => ['application/pdf'],
-                'png'  => ['image/png'],
-                'jpg'  => ['image/jpeg'],
-                'jpeg' => ['image/jpeg'],
-                'gif'  => ['image/gif'],
-                'tif'  => ['image/tiff'],
-                'tiff' => ['image/tiff'],
-                'bmp'  => ['image/bmp', 'image/x-ms-bmp'],
-                'doc'  => ['application/msword'],
-                'docx' => ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/zip'],
-                'odt'  => ['application/vnd.oasis.opendocument.text', 'application/zip'],
-                'xls'  => ['application/vnd.ms-excel'],
-                'xlsx' => ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/zip'],
-                'ppt'  => ['application/vnd.ms-powerpoint'],
-                'pptx' => ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/zip'],
-                'txt'  => ['text/plain']
-            ];
-
-            if (!in_array($detected, $mimeExtensions[$ext] ?? [], true)) {
-                continue;
+            // Detect MIME type with graceful fallback
+            $detected = '';
+            if (class_exists('finfo')) {
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                $detected = $finfo->file($file['tmp_name']) ?: '';
+            } elseif (function_exists('mime_content_type')) {
+                $detected = mime_content_type($file['tmp_name']) ?: '';
             }
 
-            $stored      = bin2hex(random_bytes(20)) . '.' . $ext;
-            $destination = __DIR__ . '/../storage/uploads/' . $stored;
+            $mime = $detected ?: ($mimeMap[$ext] ?? 'application/octet-stream');
+            $stored = bin2hex(random_bytes(20)) . '.' . $ext;
+            $destination = $uploadDir . '/' . $stored;
 
             if (!move_uploaded_file($file['tmp_name'], $destination)) {
                 continue;
             }
 
-            $mime = $detected;
-            $size = (int)$file['size'];
+            $size   = (int)$file['size'];
+            $status = 'Pending';
 
-            $stmt = db()->prepare('INSERT INTO jobs(user_id, original_name, stored_name, mime_type, file_size, copies, paper_size, colour_mode, notes) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)');
-            $stmt->bind_param('isssiisss', $user['id'], $original, $stored, $mime, $size, $copies, $paper, $colour, $notes);
-            $stmt->execute();
-            $id = db()->insert_id;
+            // Explicitly set status to 'Pending' so admin pending queries pick it up immediately
+            $stmt = db()->prepare('INSERT INTO jobs (user_id, status, original_name, stored_name, mime_type, file_size, copies, paper_size, colour_mode, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            if ($stmt) {
+                $stmt->bind_param('issssiisss', $user['id'], $status, $original, $stored, $mime, $size, $copies, $paper, $colour, $notes);
+                if ($stmt->execute()) {
+                    $id = db()->insert_id;
+                    $added++;
 
-            send_notice('job_received', $user['email'], ['email' => $user['email'], 'job_id' => $id, 'filename' => $original]);
-            $added++;
+                    try {
+                        if (function_exists('send_notice')) {
+                            send_notice('job_received', $user['email'], ['email' => $user['email'], 'job_id' => $id, 'filename' => $original]);
+                        }
+                    } catch (\Throwable $t) {
+                        // Keep submission successful even if mail alert encounters an issue
+                    }
+                }
+            }
         }
 
         if ($added) {
             flash('success', "{$added} print job" . ($added === 1 ? ' was' : 's were') . ' submitted. Each file has its own job.');
+            // Closes jobs view and returns user to the dashboard
+            redirect('/client/index.php');
         } else {
             flash('error', 'No files were accepted. Use supported file types up to 25 MB each.');
+            redirect('/client/jobs.php#new-job');
         }
-
-        redirect('/client/jobs.php?status=Pending');
     }
 }
 
