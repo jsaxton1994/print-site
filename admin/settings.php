@@ -3,6 +3,8 @@ require __DIR__ . '/../app/bootstrap.php';
 refresh_user();
 require_login('admin');
 
+$allPaperOptions = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $section = post_value('section');
@@ -16,7 +18,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $completeMode   = post_value('auto_complete_mode');
         $delayMinutes   = max(1, (int)post_value('auto_complete_minutes', '2'));
 
-        if (!in_array($paper, ['A4', 'A3', 'Letter', 'Legal', '4x6'], true) ||
+        // Collect and validate selected allowed paper sizes
+        $postedAllowed = $_POST['allowed_paper_sizes'] ?? [];
+        if (!is_array($postedAllowed)) {
+            $postedAllowed = [];
+        }
+        $validAllowed = array_values(array_intersect($postedAllowed, $allPaperOptions));
+        if (empty($validAllowed)) {
+            $validAllowed = [$paper ?: 'A4'];
+        }
+
+        // Ensure default paper size is one of the allowed sizes
+        if (!in_array($paper, $validAllowed, true)) {
+            $paper = $validAllowed[0];
+        }
+
+        if (!in_array($paper, $allPaperOptions, true) ||
             !in_array($colour, ['Colour', 'Black & White'], true) ||
             ($address !== '' && !filter_var($address, FILTER_VALIDATE_EMAIL))) {
             flash('error', 'Check paper, colour, or printer email address.');
@@ -24,6 +41,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         set_setting('paper_size', $paper);
+        set_setting('allowed_paper_sizes', implode(',', $validAllowed));
         set_setting('colour_options', $colour);
         set_setting('printer_email', $address);
         set_setting('allow_client_settings', $allowClient);
@@ -31,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         set_setting('auto_complete_mode', in_array($completeMode, ['timer', 'immediate', 'manual'], true) ? $completeMode : 'timer');
         set_setting('auto_complete_minutes', (string)$delayMinutes);
 
-        flash('success', 'Epson printer and auto-completion settings saved.');
+        flash('success', 'Epson printer and paper size settings saved.');
     } elseif ($section === 'mail') {
         $from       = trim((string)post_value('mail_from'));
         $fromName   = trim((string)post_value('mail_from_name'));
@@ -128,18 +146,40 @@ page_title('Settings Management', 'Configure printer delivery and application co
                 </label>
             </div>
 
+            <!-- Allowed Paper Sizes Configuration -->
+            <div style="margin-bottom: 1.25rem;">
+                <label style="display:block; margin-bottom: 0.5rem; font-weight: 600;">Allowed paper sizes for clients</label>
+                <div style="display:flex; gap: 1.25rem; flex-wrap: wrap; padding: 0.75rem 1rem; background: var(--bg-soft, rgba(0,0,0,0.02)); border: 1px solid var(--border, rgba(0,0,0,0.08)); border-radius: 8px;">
+                    <?php 
+                        $rawAllowed = setting('allowed_paper_sizes', 'A4,A3,Letter,Legal,4x6');
+                        $savedAllowed = array_filter(array_map('trim', explode(',', $rawAllowed)));
+                        if (empty($savedAllowed)) {
+                            $savedAllowed = $allPaperOptions;
+                        }
+                    ?>
+                    <?php foreach ($allPaperOptions as $opt): ?>
+                        <label style="display:inline-flex; align-items:center; gap: 6px; font-weight: normal; cursor: pointer; user-select: none;">
+                            <input type="checkbox" name="allowed_paper_sizes[]" value="<?=e($opt)?>" <?=in_array($opt, $savedAllowed, true) ? 'checked' : ''?>>
+                            <span><?=e($opt)?></span>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+                <small class="muted">Clients will only be allowed to choose from the checked paper sizes above.</small>
+            </div>
+
             <div class="field-row">
                 <label>Default paper size
                     <select name="paper_size">
-                        <?php foreach (['A4', 'A3', 'Letter', 'Legal', '4x6'] as $o): ?>
-                            <option <?=$o === setting('paper_size', 'A4') ? 'selected' : ''?>><?=e($o)?></option>
+                        <?php foreach ($allPaperOptions as $o): ?>
+                            <option value="<?=e($o)?>" <?=$o === setting('paper_size', 'A4') ? 'selected' : ''?>><?=e($o)?></option>
                         <?php endforeach; ?>
                     </select>
+                    <small>Default selection used if client options are locked or not selected.</small>
                 </label>
                 <label>Default colour options
                     <select name="colour_options">
                         <?php foreach (['Colour', 'Black & White'] as $o): ?>
-                            <option <?=$o === setting('colour_options', 'Colour') ? 'selected' : ''?>><?=e($o)?></option>
+                            <option value="<?=e($o)?>" <?=$o === setting('colour_options', 'Colour') ? 'selected' : ''?>><?=e($o)?></option>
                         <?php endforeach; ?>
                     </select>
                 </label>
@@ -221,7 +261,7 @@ page_title('Settings Management', 'Configure printer delivery and application co
         </form>
     </section>
 
-    <!-- IMAP Mailbox Settings (Optional for Printer Feedback) -->
+    <!-- IMAP Mailbox Settings -->
     <section class="settings-card">
         <div class="settings-heading">
             <span class="settings-icon blue">📥</span>

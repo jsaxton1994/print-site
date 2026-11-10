@@ -9,7 +9,14 @@ if (!in_array($filter, $allowed, true)) {
     $filter = 'Pending';
 }
 
-$paperOptions  = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
+// Fetch allowed paper sizes defined by admin
+$allPossiblePaper = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
+$rawAllowed = setting('allowed_paper_sizes', 'A4,A3,Letter,Legal,4x6');
+$paperOptions = array_values(array_intersect(array_filter(array_map('trim', explode(',', $rawAllowed))), $allPossiblePaper));
+if (empty($paperOptions)) {
+    $paperOptions = [setting('paper_size', 'A4')];
+}
+
 $colourOptions = ['Colour', 'Black & White'];
 $allowClientSettings = setting('allow_client_settings', '1') === '1';
 $maxAttachmentsLimit = max(1, (int)setting('max_attachments_limit', '10'));
@@ -32,11 +39,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/client/jobs.php#new-job');
         }
 
-        // Determine settings
+        // Determine settings based on admin allowed options
         if ($allowClientSettings && in_array(post_value('paper_size'), $paperOptions, true)) {
             $paper = post_value('paper_size');
         } else {
-            $paper = setting('paper_size', 'A4');
+            $defaultPaper = setting('paper_size', 'A4');
+            $paper = in_array($defaultPaper, $paperOptions, true) ? $defaultPaper : $paperOptions[0];
         }
 
         if ($allowClientSettings && in_array(post_value('colour_mode'), $colourOptions, true)) {
@@ -98,7 +106,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 continue;
             }
 
-            // Detect MIME type with graceful fallback
             $detected = '';
             if (class_exists('finfo')) {
                 $finfo = new finfo(FILEINFO_MIME_TYPE);
@@ -118,7 +125,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $size   = (int)$file['size'];
             $status = 'Pending';
 
-            // Explicitly set status to 'Pending' so admin pending queries pick it up immediately
             $stmt = db()->prepare('INSERT INTO jobs (user_id, status, original_name, stored_name, mime_type, file_size, copies, paper_size, colour_mode, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
             if ($stmt) {
                 $stmt->bind_param('issssiisss', $user['id'], $status, $original, $stored, $mime, $size, $copies, $paper, $colour, $notes);
@@ -131,7 +137,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             send_notice('job_received', $user['email'], ['email' => $user['email'], 'job_id' => $id, 'filename' => $original]);
                         }
                     } catch (\Throwable $t) {
-                        // Keep submission successful even if mail alert encounters an issue
                     }
                 }
             }
@@ -139,7 +144,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($added) {
             flash('success', "{$added} print job" . ($added === 1 ? ' was' : 's were') . ' submitted. Each file has its own job.');
-            // Closes jobs view and returns user to the dashboard
             redirect('/client/index.php');
         } else {
             flash('error', 'No files were accepted. Use supported file types up to 25 MB each.');
@@ -148,9 +152,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$sql  = 'SELECT * FROM jobs WHERE user_id = ? AND status = ? ORDER BY created_at DESC';
+// Pagination for client jobs (15 per page)
+$perPage = 15;
+$page = max(1, (int)($_GET['page'] ?? 1));
+
+$stmtCount = db()->prepare('SELECT COUNT(*) FROM jobs WHERE user_id = ? AND status = ?');
+$stmtCount->bind_param('is', $user['id'], $filter);
+$stmtCount->execute();
+$totalJobs = (int)$stmtCount->get_result()->fetch_column();
+$totalPages = max(1, (int)ceil($totalJobs / $perPage));
+
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = ($page - 1) * $perPage;
+
+$sql  = 'SELECT * FROM jobs WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?';
 $stmt = db()->prepare($sql);
-$stmt->bind_param('is', $user['id'], $filter);
+$stmt->bind_param('isii', $user['id'], $filter, $perPage, $offset);
 $stmt->execute();
 $jobs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
@@ -217,6 +236,34 @@ page_title('Job Management', 'Your files, from submission through to collection.
             </tbody>
         </table>
     </div>
+
+    <?php if ($totalPages > 1): ?>
+        <div style="display:flex; justify-content:center; align-items:center; gap:6px; padding:1.25rem; border-top:1px solid var(--border, rgba(0,0,0,0.08)); flex-wrap:wrap;">
+            <?php 
+                $buildPageUrl = function($targetPage) use ($filter) {
+                    return '/client/jobs.php?status=' . urlencode($filter) . '&page=' . $targetPage;
+                };
+            ?>
+
+            <?php if ($page > 1): ?>
+                <a class="button button-small button-soft" href="<?= e($buildPageUrl($page - 1)) ?>">&laquo; Prev</a>
+            <?php endif; ?>
+
+            <?php for ($i = 1; $i <= $totalPages; $i++): ?>
+                <?php if ($i === 1 || $i === $totalPages || ($i >= $page - 2 && $i <= $page + 2)): ?>
+                    <a class="button button-small <?= $i === $page ? 'button-primary' : 'button-soft' ?>" href="<?= e($buildPageUrl($i)) ?>">
+                        <?= $i ?>
+                    </a>
+                <?php elseif ($i === $page - 3 || $i === $page + 3): ?>
+                    <span style="padding:0 4px; color:var(--muted, #64748b);">&hellip;</span>
+                <?php endif; ?>
+            <?php endfor; ?>
+
+            <?php if ($page < $totalPages): ?>
+                <a class="button button-small button-soft" href="<?= e($buildPageUrl($page + 1)) ?>">Next &raquo;</a>
+            <?php endif; ?>
+        </div>
+    <?php endif; ?>
 </div>
 
 <!-- New Job Modal -->

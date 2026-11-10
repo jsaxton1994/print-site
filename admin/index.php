@@ -2,7 +2,38 @@
 require __DIR__.'/../app/bootstrap.php';
 refresh_user();
 
-if (!current_user()) {
+$currentUser = current_user();
+$isAdmin = $currentUser && in_array(strtolower((string)($currentUser['role'] ?? '')), ['admin', 'administrator'], true);
+
+// Direct Admin Sign In Handler: avoids redirect loops with active client sessions
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['admin_login']) || isset($_POST['email']))) {
+    verify_csrf();
+    $email = trim((string)($_POST['email'] ?? ''));
+    $password = (string)($_POST['password'] ?? '');
+
+    $stmt = db()->prepare("SELECT * FROM users WHERE email = ? LIMIT 1");
+    $stmt->bind_param('s', $email);
+    $stmt->execute();
+    $adminCandidate = $stmt->get_result()->fetch_assoc();
+
+    if ($adminCandidate && password_verify($password, $adminCandidate['password'])) {
+        if (in_array(strtolower((string)($adminCandidate['role'] ?? '')), ['admin', 'administrator'], true)) {
+            $_SESSION['user_id'] = $adminCandidate['id'];
+            refresh_user();
+            flash('success', 'Welcome to the admin console.');
+            redirect('/admin/');
+        } else {
+            flash('error', 'This account does not have administrator privileges.');
+            redirect('/admin/');
+        }
+    } else {
+        flash('error', 'Invalid email address or password.');
+        redirect('/admin/');
+    }
+}
+
+// If not logged in as an administrator, show sign in form without redirecting
+if (!$isAdmin) {
     render_header('Sign in', 'admin');
     ?>
     <div class="auth-shell admin-auth">
@@ -15,9 +46,16 @@ if (!current_user()) {
         <div class="auth-panel">
             <div class="eyebrow">ADMIN ACCESS</div>
             <h1>Welcome to<br>the control room</h1>
-            <p class="muted">Sign in to manage print jobs and accounts.</p>
-            <form method="post" action="/login.php" class="form-stack">
+            <p class="muted">
+                <?php if ($currentUser): ?>
+                    Currently signed in as <?=e($currentUser['email'])?> (non-admin). Please sign in with an admin account.
+                <?php else: ?>
+                    Sign in to manage print jobs and accounts.
+                <?php endif; ?>
+            </p>
+            <form method="post" action="/admin/" class="form-stack">
                 <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
+                <input type="hidden" name="admin_login" value="1">
                 <label>Email address
                     <input type="email" name="email" required placeholder="admin@company.com">
                 </label>
@@ -65,11 +103,11 @@ foreach (['Pending', 'Processing', 'Completed', 'Cancelled'] as $s) {
 $usersCount = (int)db()->query('SELECT COUNT(*) FROM users')->fetch_column();
 $jobs = db()->query("SELECT j.*, u.email FROM jobs j JOIN users u ON u.id = j.user_id WHERE j.status = 'Pending' ORDER BY j.created_at ASC LIMIT 8")->fetch_all(MYSQLI_ASSOC);
 
-// Email Logs Pagination (10 per page)
+// Email Logs Pagination (15 per page)
 $emailLogs = [];
 $totalEmailLogs = 0;
 $emailPage = max(1, (int)($_GET['email_page'] ?? 1));
-$perPage = 10;
+$perPage = 15;
 $totalEmailPages = 1;
 
 $tableCheck = db()->query("SHOW TABLES LIKE 'email_logs'");
@@ -188,7 +226,7 @@ page_title('Dashboard', 'A quick overview of the print room.');
     <div>
         <div class="eyebrow">COMMUNICATIONS AUDIT</div>
         <h2>Sent email logs</h2>
-        <p>Record of all transactional notifications dispatched to clients (10 per page).</p>
+        <p>Record of all transactional notifications dispatched to clients (15 per page).</p>
     </div>
     <?php if ($totalEmailLogs > 0): ?>
         <small class="muted">Showing page <?= $emailPage ?> of <?= $totalEmailPages ?> (<?= $totalEmailLogs ?> total)</small>
