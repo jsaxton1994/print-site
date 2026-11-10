@@ -9,15 +9,30 @@ if (!in_array($filter, $allowed, true)) {
     $filter = 'Pending';
 }
 
-// Fetch allowed paper sizes defined by admin
-$allPossiblePaper = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
-$rawAllowed = setting('allowed_paper_sizes', 'A4,A3,Letter,Legal,4x6');
-$paperOptions = array_values(array_intersect(array_filter(array_map('trim', explode(',', $rawAllowed))), $allPossiblePaper));
-if (empty($paperOptions)) {
-    $paperOptions = [setting('paper_size', 'A4')];
+// Helper to extract options from comma-separated DB settings
+function parse_csv_setting(string $key, array $fallback = []): array {
+    $val = trim(setting($key, ''));
+    if ($val !== '') {
+        $items = array_filter(array_map('trim', explode(',', $val)));
+        if (!empty($items)) {
+            return array_values(array_unique($items));
+        }
+    }
+    return $fallback;
 }
 
-$colourOptions = ['Colour', 'Black & White'];
+// 1. Fetch allowed paper sizes configured by admin
+$paperOptions = parse_csv_setting('allowed_paper_sizes');
+if (empty($paperOptions)) {
+    $paperOptions = parse_csv_setting('paper_size', ['A4', 'A3', 'Letter', 'Legal', '4x6']);
+}
+
+// 2. Fetch allowed colour options configured by admin
+$colourOptions = parse_csv_setting('allowed_colour_options');
+if (empty($colourOptions)) {
+    $colourOptions = parse_csv_setting('colour_options', ['Colour', 'Black & White']);
+}
+
 $allowClientSettings = setting('allow_client_settings', '1') === '1';
 $maxAttachmentsLimit = max(1, (int)setting('max_attachments_limit', '10'));
 
@@ -39,18 +54,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/client/jobs.php#new-job');
         }
 
-        // Determine settings based on admin allowed options
-        if ($allowClientSettings && in_array(post_value('paper_size'), $paperOptions, true)) {
-            $paper = post_value('paper_size');
+        // Determine paper size from admin allowed options
+        $postedPaper = (string)post_value('paper_size');
+        if ($allowClientSettings && in_array($postedPaper, $paperOptions, true)) {
+            $paper = $postedPaper;
         } else {
-            $defaultPaper = setting('paper_size', 'A4');
-            $paper = in_array($defaultPaper, $paperOptions, true) ? $defaultPaper : $paperOptions[0];
+            $defaultPaper = setting('paper_size', $paperOptions[0] ?? 'A4');
+            $paper = in_array($defaultPaper, $paperOptions, true) ? $defaultPaper : ($paperOptions[0] ?? 'A4');
         }
 
-        if ($allowClientSettings && in_array(post_value('colour_mode'), $colourOptions, true)) {
-            $colour = post_value('colour_mode');
+        // Determine colour mode from admin allowed options
+        $postedColour = (string)post_value('colour_mode');
+        if ($allowClientSettings && in_array($postedColour, $colourOptions, true)) {
+            $colour = $postedColour;
         } else {
-            $colour = setting('colour_options', 'Colour');
+            $defaultColour = setting('colour_options', $colourOptions[0] ?? 'Colour');
+            $colour = in_array($defaultColour, $colourOptions, true) ? $defaultColour : ($colourOptions[0] ?? 'Colour');
         }
 
         $copies = 1;
@@ -290,7 +309,7 @@ page_title('Job Management', 'Your files, from submission through to collection.
                     <label>Paper size
                         <select name="paper_size">
                             <?php foreach ($paperOptions as $p): ?>
-                                <option value="<?= e($p) ?>" <?= $p === setting('paper_size', 'A4') ? 'selected' : '' ?>><?= e($p) ?></option>
+                                <option value="<?= e($p) ?>"><?= e($p) ?></option>
                             <?php endforeach; ?>
                         </select>
                     </label>
@@ -298,7 +317,7 @@ page_title('Job Management', 'Your files, from submission through to collection.
                     <label>Colour mode
                         <select name="colour_mode">
                             <?php foreach ($colourOptions as $c): ?>
-                                <option value="<?= e($c) ?>" <?= $c === setting('colour_options', 'Colour') ? 'selected' : '' ?>><?= e($c) ?></option>
+                                <option value="<?= e($c) ?>"><?= e($c) ?></option>
                             <?php endforeach; ?>
                         </select>
                     </label>
@@ -306,7 +325,7 @@ page_title('Job Management', 'Your files, from submission through to collection.
             <?php else: ?>
                 <div class="setting-preview">
                     <small>DEFAULT PRINT SETTINGS</small>
-                    <strong><?= e(setting('paper_size', 'A4')) ?> · <?= e(setting('colour_options', 'Colour')) ?></strong>
+                    <strong><?= e($paperOptions[0] ?? setting('paper_size', 'A4')) ?> · <?= e($colourOptions[0] ?? setting('colour_options', 'Colour')) ?></strong>
                 </div>
             <?php endif; ?>
 

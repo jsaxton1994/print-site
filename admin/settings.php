@@ -3,53 +3,74 @@ require __DIR__ . '/../app/bootstrap.php';
 refresh_user();
 require_login('admin');
 
-$allPaperOptions = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
+// Helper to extract options from database settings split with a comma
+function get_db_comma_options(string $primaryKey, array $alternateKeys = [], array $fallback = []): array {
+    $keys = array_merge([$primaryKey], $alternateKeys);
+    foreach ($keys as $k) {
+        $val = setting($k, '');
+        if ($val !== '') {
+            $items = array_filter(array_map('trim', explode(',', $val)));
+            if (!empty($items)) {
+                return array_values(array_unique($items));
+            }
+        }
+    }
+    return $fallback;
+}
+
+// Fetch paper size options and colour options from database settings split with a comma
+$allPaperOptions  = get_db_comma_options('paper_size', ['paper_sizes', 'all_paper_sizes'], ['A4', 'A3', 'Letter', 'Legal', '4x6']);
+$allColourOptions = get_db_comma_options('colour_options', ['color_options', 'colour_mode'], ['Colour', 'Black & White']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $section = post_value('section');
 
     if ($section === 'printer') {
-        $paper          = post_value('paper_size');
-        $colour         = post_value('colour_options');
         $address        = post_value('printer_email');
-        $allowClient    = post_value('allow_client_settings') === '0' ? '0' : '1';
         $maxAttachments = max(1, min(50, (int)post_value('max_attachments_limit', '10')));
         $completeMode   = post_value('auto_complete_mode');
         $delayMinutes   = max(1, (int)post_value('auto_complete_minutes', '2'));
 
         // Collect and validate selected allowed paper sizes
-        $postedAllowed = $_POST['allowed_paper_sizes'] ?? [];
-        if (!is_array($postedAllowed)) {
-            $postedAllowed = [];
+        $postedAllowedPaper = $_POST['allowed_paper_sizes'] ?? [];
+        if (!is_array($postedAllowedPaper)) {
+            $postedAllowedPaper = [];
         }
-        $validAllowed = array_values(array_intersect($postedAllowed, $allPaperOptions));
-        if (empty($validAllowed)) {
-            $validAllowed = [$paper ?: 'A4'];
-        }
+        $validAllowedPaper = array_values(array_intersect($postedAllowedPaper, $allPaperOptions));
 
-        // Ensure default paper size is one of the allowed sizes
-        if (!in_array($paper, $validAllowed, true)) {
-            $paper = $validAllowed[0];
-        }
-
-        if (!in_array($paper, $allPaperOptions, true) ||
-            !in_array($colour, ['Colour', 'Black & White'], true) ||
-            ($address !== '' && !filter_var($address, FILTER_VALIDATE_EMAIL))) {
-            flash('error', 'Check paper, colour, or printer email address.');
+        if (empty($validAllowedPaper)) {
+            flash('error', 'Please select at least one allowed paper size.');
             redirect('/admin/settings.php');
         }
 
-        set_setting('paper_size', $paper);
-        set_setting('allowed_paper_sizes', implode(',', $validAllowed));
-        set_setting('colour_options', $colour);
+        // Collect and validate selected allowed colour options
+        $postedAllowedColour = $_POST['allowed_colour_options'] ?? [];
+        if (!is_array($postedAllowedColour)) {
+            $postedAllowedColour = [];
+        }
+        $validAllowedColour = array_values(array_intersect($postedAllowedColour, $allColourOptions));
+
+        if (empty($validAllowedColour)) {
+            flash('error', 'Please select at least one allowed color option.');
+            redirect('/admin/settings.php');
+        }
+
+        if ($address !== '' && !filter_var($address, FILTER_VALIDATE_EMAIL)) {
+            flash('error', 'Check printer email address.');
+            redirect('/admin/settings.php');
+        }
+
+        // Save selected allowed choices
+        set_setting('allowed_paper_sizes', implode(',', $validAllowedPaper));
+        set_setting('allowed_colour_options', implode(',', $validAllowedColour));
+
         set_setting('printer_email', $address);
-        set_setting('allow_client_settings', $allowClient);
         set_setting('max_attachments_limit', (string)$maxAttachments);
         set_setting('auto_complete_mode', in_array($completeMode, ['timer', 'immediate', 'manual'], true) ? $completeMode : 'timer');
         set_setting('auto_complete_minutes', (string)$delayMinutes);
 
-        flash('success', 'Epson printer and paper size settings saved.');
+        flash('success', 'Epson printer settings saved.');
     } elseif ($section === 'mail') {
         $from       = trim((string)post_value('mail_from'));
         $fromName   = trim((string)post_value('mail_from_name'));
@@ -124,66 +145,61 @@ page_title('Settings Management', 'Configure printer delivery and application co
             <span class="settings-icon orange">▣</span>
             <div>
                 <h2>Epson Printer Settings</h2>
-                <p>Defaults, client submission preferences, and completion automation.</p>
+                <p>Allowed paper sizes, allowed color options, and completion automation.</p>
             </div>
         </div>
         <form method="post" class="settings-form">
             <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
             <input type="hidden" name="section" value="printer">
 
-            <div class="field-row">
-                <label>Client job submission options
-                    <select name="allow_client_settings">
-                        <option value="1" <?=setting('allow_client_settings', '1') === '1' ? 'selected' : ''?>>Allow client to choose paper size & colour mode</option>
-                        <option value="0" <?=setting('allow_client_settings', '1') === '0' ? 'selected' : ''?>>Lock client to default settings below</option>
-                    </select>
-                    <small>Choose whether clients can select their own print settings or use fixed admin defaults.</small>
-                </label>
-
-                <label>Max attachments limit
-                    <input name="max_attachments_limit" type="number" min="1" max="50" value="<?=e(setting('max_attachments_limit', '10'))?>" required>
-                    <small>Maximum number of files allowed per job upload (Epson Email Print limit is 10).</small>
-                </label>
-            </div>
-
-            <!-- Allowed Paper Sizes Configuration -->
+            <!-- Allowed Paper Size (from paper_size in database, split by comma) -->
             <div style="margin-bottom: 1.25rem;">
-                <label style="display:block; margin-bottom: 0.5rem; font-weight: 600;">Allowed paper sizes for clients</label>
+                <label style="display:block; margin-bottom: 0.5rem; font-weight: 600;">Allowed Paper Size</label>
                 <div style="display:flex; gap: 1.25rem; flex-wrap: wrap; padding: 0.75rem 1rem; background: var(--bg-soft, rgba(0,0,0,0.02)); border: 1px solid var(--border, rgba(0,0,0,0.08)); border-radius: 8px;">
                     <?php 
-                        $rawAllowed = setting('allowed_paper_sizes', 'A4,A3,Letter,Legal,4x6');
-                        $savedAllowed = array_filter(array_map('trim', explode(',', $rawAllowed)));
-                        if (empty($savedAllowed)) {
-                            $savedAllowed = $allPaperOptions;
+                        $rawAllowedPaper = trim(setting('allowed_paper_sizes', ''));
+                        if ($rawAllowedPaper !== '') {
+                            $savedAllowedPaper = array_filter(array_map('trim', explode(',', $rawAllowedPaper)));
+                        } else {
+                            $savedAllowedPaper = $allPaperOptions;
                         }
                     ?>
                     <?php foreach ($allPaperOptions as $opt): ?>
                         <label style="display:inline-flex; align-items:center; gap: 6px; font-weight: normal; cursor: pointer; user-select: none;">
-                            <input type="checkbox" name="allowed_paper_sizes[]" value="<?=e($opt)?>" <?=in_array($opt, $savedAllowed, true) ? 'checked' : ''?>>
+                            <input type="checkbox" name="allowed_paper_sizes[]" value="<?=e($opt)?>" <?=in_array($opt, $savedAllowedPaper, true) ? 'checked' : ''?>>
                             <span><?=e($opt)?></span>
                         </label>
                     <?php endforeach; ?>
                 </div>
-                <small class="muted">Clients will only be allowed to choose from the checked paper sizes above.</small>
+                <small class="muted">Check the paper sizes loaded from the database that are enabled for use.</small>
             </div>
 
-            <div class="field-row">
-                <label>Default paper size
-                    <select name="paper_size">
-                        <?php foreach ($allPaperOptions as $o): ?>
-                            <option value="<?=e($o)?>" <?=$o === setting('paper_size', 'A4') ? 'selected' : ''?>><?=e($o)?></option>
-                        <?php endforeach; ?>
-                    </select>
-                    <small>Default selection used if client options are locked or not selected.</small>
-                </label>
-                <label>Default colour options
-                    <select name="colour_options">
-                        <?php foreach (['Colour', 'Black & White'] as $o): ?>
-                            <option value="<?=e($o)?>" <?=$o === setting('colour_options', 'Colour') ? 'selected' : ''?>><?=e($o)?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </label>
+            <!-- Allowed Color Options (from colour_options in database, split by comma) -->
+            <div style="margin-bottom: 1.25rem;">
+                <label style="display:block; margin-bottom: 0.5rem; font-weight: 600;">Allowed Color Options</label>
+                <div style="display:flex; gap: 1.25rem; flex-wrap: wrap; padding: 0.75rem 1rem; background: var(--bg-soft, rgba(0,0,0,0.02)); border: 1px solid var(--border, rgba(0,0,0,0.08)); border-radius: 8px;">
+                    <?php 
+                        $rawAllowedColour = trim(setting('allowed_colour_options', ''));
+                        if ($rawAllowedColour !== '') {
+                            $savedAllowedColour = array_filter(array_map('trim', explode(',', $rawAllowedColour)));
+                        } else {
+                            $savedAllowedColour = $allColourOptions;
+                        }
+                    ?>
+                    <?php foreach ($allColourOptions as $opt): ?>
+                        <label style="display:inline-flex; align-items:center; gap: 6px; font-weight: normal; cursor: pointer; user-select: none;">
+                            <input type="checkbox" name="allowed_colour_options[]" value="<?=e($opt)?>" <?=in_array($opt, $savedAllowedColour, true) ? 'checked' : ''?>>
+                            <span><?=e($opt)?></span>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+                <small class="muted">Check the color options loaded from the database that are enabled for use.</small>
             </div>
+
+            <label>Max attachments limit
+                <input name="max_attachments_limit" type="number" min="1" max="50" value="<?=e(setting('max_attachments_limit', '10'))?>" required>
+                <small>Maximum number of files allowed per job upload (Epson Email Print limit is 10).</small>
+            </label>
 
             <label>Epson Email Print address
                 <input type="email" name="printer_email" value="<?=e(setting('printer_email'))?>" placeholder="printer@print.epsonconnect.com">
