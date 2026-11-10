@@ -14,13 +14,32 @@ if (!$job) {
     exit('Job not found');
 }
 
+// Auto-check Epson status when viewing a processing job
+if ($job['status'] === 'Processing') {
+    $res = check_epson_completion();
+    if ($res['completed'] > 0 || $res['cancelled'] > 0) {
+        $stmt->execute();
+        $job = $stmt->get_result()->fetch_assoc();
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
     $action = post_value('action');
     $note   = substr(post_value('admin_note'), 0, 500);
     $path   = __DIR__ . '/../storage/uploads/' . $job['stored_name'];
 
-    if ($job['status'] === 'Pending' && $action === 'approve') {
+    if ($action === 'check_epson') {
+        $res = check_epson_completion();
+        if ($res['cancelled'] > 0) {
+            flash('error', 'Printer reported an error. The job has been automatically cancelled.');
+        } elseif ($res['completed'] > 0) {
+            flash('success', 'Epson completion verified! Print job marked as completed.');
+        } else {
+            flash('info', 'No update from Epson yet. The job remains in processing.');
+        }
+        redirect('/admin/job.php?id=' . $id);
+    } elseif ($job['status'] === 'Pending' && $action === 'approve') {
         $dispatch = dispatch_to_printer($job, $path);
         if (!$dispatch) {
             flash('error', 'Printer email dispatch failed. Check Epson address and mail transport settings; the job remains pending.');
@@ -35,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('/admin/job.php?id=' . $id);
             }
         } catch (Throwable $error) {
-            flash('error', 'Printer accepted the email, but the job status could not be updated. Check job #' . $id . ' before retrying to avoid duplicate printing.');
+            flash('error', 'Printer accepted the email, but the job status could not be updated. Check job #' . $id . ' before retrying.');
             redirect('/admin/job.php?id=' . $id);
         }
         $noticeSent = send_notice('job_processing', $job['email'], ['email' => $job['email'], 'job_id' => $id, 'filename' => $job['original_name']]);
@@ -52,6 +71,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute();
         $noticeSent = send_notice('job_completed', $job['email'], ['email' => $job['email'], 'job_id' => $id, 'filename' => $job['original_name']]);
         flash($noticeSent ? 'success' : 'info', $noticeSent ? 'Job marked completed.' : 'Job marked completed, but the client notification email could not be sent.');
+    } elseif ($action === 'requeue' && $job['status'] !== 'Pending') {
+        $stmt = db()->prepare("UPDATE jobs SET status = 'Pending', completed_at = NULL, admin_note = ? WHERE id = ?");
+        $stmt->bind_param('si', $note, $id);
+        $stmt->execute();
+        flash('success', 'Job #' . str_pad((string)$id, 5, '0', STR_PAD_LEFT) . ' has been requeued back to Pending.');
     } else {
         flash('error', 'That action is not available for this job.');
     }
@@ -122,7 +146,7 @@ page_title('Job details', 'Review the request and update its print status.');
     <aside class="action-card">
         <div class="eyebrow">JOB ACTIONS</div>
         <h2>Update status</h2>
-        <p>Actions notify the client by email.</p>
+        <p>Actions update the job and notify the client by email when processed.</p>
 
         <form method="post" class="form-stack">
             <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
@@ -136,8 +160,11 @@ page_title('Job details', 'Review the request and update its print status.');
                 <button class="button button-danger button-wide" name="action" value="cancel">Cancel job</button>
             <?php elseif ($job['status'] === 'Processing'): ?>
                 <button class="button button-admin button-wide" name="action" value="complete">✓ Mark completed</button>
+                <button class="button button-soft button-wide" name="action" value="check_epson">⟳ Check printer status</button>
+                <button class="button button-soft button-wide" name="action" value="requeue" onclick="return confirm('Are you sure you want to requeue this job back to Pending?');">↺ Requeue to Pending</button>
             <?php else: ?>
-                <div class="notice-card">This job is <?= e(strtolower($job['status'])) ?>. No further status actions are available.</div>
+                <div class="notice-card">This job is <?= e(strtolower($job['status'])) ?>.</div>
+                <button class="button button-soft button-wide" name="action" value="requeue" onclick="return confirm('Are you sure you want to requeue this job back to Pending?');">↺ Requeue to Pending</button>
             <?php endif; ?>
         </form>
 
@@ -176,7 +203,6 @@ function closePreviewModal() {
     modal.style.display = 'none';
 }
 
-// Close when clicking outside the modal window
 document.getElementById('previewModal').addEventListener('click', function(e) {
     if (e.target === this) {
         closePreviewModal();
