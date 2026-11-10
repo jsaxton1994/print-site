@@ -8,10 +8,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $section = post_value('section');
 
     if ($section === 'printer') {
-        $paper       = post_value('paper_size');
-        $colour      = post_value('colour_options');
-        $address     = post_value('printer_email');
-        $allowClient = post_value('allow_client_settings') === '0' ? '0' : '1';
+        $paper          = post_value('paper_size');
+        $colour         = post_value('colour_options');
+        $address        = post_value('printer_email');
+        $allowClient    = post_value('allow_client_settings') === '0' ? '0' : '1';
+        $maxAttachments = max(1, min(50, (int)post_value('max_attachments_limit', '10')));
+        $completeMode   = post_value('auto_complete_mode');
+        $delayMinutes   = max(1, (int)post_value('auto_complete_minutes', '2'));
 
         if (!in_array($paper, ['A4', 'A3', 'Letter', 'Legal', '4x6'], true) ||
             !in_array($colour, ['Colour', 'Black & White'], true) ||
@@ -24,7 +27,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         set_setting('colour_options', $colour);
         set_setting('printer_email', $address);
         set_setting('allow_client_settings', $allowClient);
-        flash('success', 'Epson printer settings saved.');
+        set_setting('max_attachments_limit', (string)$maxAttachments);
+        set_setting('auto_complete_mode', in_array($completeMode, ['timer', 'immediate', 'manual'], true) ? $completeMode : 'timer');
+        set_setting('auto_complete_minutes', (string)$delayMinutes);
+
+        flash('success', 'Epson printer and auto-completion settings saved.');
     } elseif ($section === 'mail') {
         $from       = trim((string)post_value('mail_from'));
         $fromName   = trim((string)post_value('mail_from_name'));
@@ -66,22 +73,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         flash('success', 'SMTP mail settings saved.');
     } elseif ($section === 'imap') {
-        $imapHost = trim((string)post_value('imap_host'));
-        $imapPort = (int)post_value('imap_port');
-        $imapUser = trim((string)post_value('imap_username'));
-        $imapPass = (string)post_value('imap_password');
-        $imapEnc  = strtolower(trim((string)post_value('imap_encryption')));
+        $iHost = trim((string)post_value('imap_host'));
+        $iPort = (int)post_value('imap_port', '993');
+        $iUser = trim((string)post_value('imap_username'));
+        $iPass = (string)post_value('imap_password');
+        $iEnc  = strtolower(trim((string)post_value('imap_encryption', 'ssl')));
 
-        set_setting('imap_host', $imapHost);
-        set_setting('imap_port', (string)($imapPort > 0 ? $imapPort : 993));
-        set_setting('imap_username', $imapUser);
-        set_setting('imap_encryption', in_array($imapEnc, ['ssl', 'tls', 'none'], true) ? $imapEnc : 'ssl');
-        if ($imapPass !== '') {
-            set_setting('imap_password', $imapPass);
+        set_setting('imap_host', $iHost);
+        set_setting('imap_port', (string)$iPort);
+        set_setting('imap_username', $iUser);
+        set_setting('imap_encryption', $iEnc);
+
+        if ($iPass !== '') {
+            set_setting('imap_password', $iPass);
         }
 
-        $completed = check_epson_completion();
-        flash('success', 'Epson auto-complete mailbox settings saved. ' . ($completed > 0 ? "Synced {$completed} completed print job(s)." : 'Mailbox connected.'));
+        flash('success', 'IMAP mailbox settings saved.');
     } elseif ($section === 'database') {
         flash('info', 'Database connection details are managed using the server environment.');
     }
@@ -90,7 +97,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 render_header('Settings Management', 'admin');
-page_title('Settings Management', 'Configure printer delivery, auto-completion, and application connections.');
+page_title('Settings Management', 'Configure printer delivery and application connections.');
 ?>
 <div class="settings-stack">
     <!-- Printer Settings -->
@@ -99,19 +106,27 @@ page_title('Settings Management', 'Configure printer delivery, auto-completion, 
             <span class="settings-icon orange">▣</span>
             <div>
                 <h2>Epson Printer Settings</h2>
-                <p>Configure the Epson Email Print recipient address and defaults.</p>
+                <p>Defaults, client submission preferences, and completion automation.</p>
             </div>
         </div>
         <form method="post" class="settings-form">
             <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
             <input type="hidden" name="section" value="printer">
 
-            <label>Client job submission options
-                <select name="allow_client_settings">
-                    <option value="1" <?=setting('allow_client_settings', '1') === '1' ? 'selected' : ''?>>Allow client to choose paper size & colour mode</option>
-                    <option value="0" <?=setting('allow_client_settings', '1') === '0' ? 'selected' : ''?>>Lock client to default settings below</option>
-                </select>
-            </label>
+            <div class="field-row">
+                <label>Client job submission options
+                    <select name="allow_client_settings">
+                        <option value="1" <?=setting('allow_client_settings', '1') === '1' ? 'selected' : ''?>>Allow client to choose paper size & colour mode</option>
+                        <option value="0" <?=setting('allow_client_settings', '1') === '0' ? 'selected' : ''?>>Lock client to default settings below</option>
+                    </select>
+                    <small>Choose whether clients can select their own print settings or use fixed admin defaults.</small>
+                </label>
+
+                <label>Max attachments limit
+                    <input name="max_attachments_limit" type="number" min="1" max="50" value="<?=e(setting('max_attachments_limit', '10'))?>" required>
+                    <small>Maximum number of files allowed per job upload (Epson Email Print limit is 10).</small>
+                </label>
+            </div>
 
             <div class="field-row">
                 <label>Default paper size
@@ -132,54 +147,24 @@ page_title('Settings Management', 'Configure printer delivery, auto-completion, 
 
             <label>Epson Email Print address
                 <input type="email" name="printer_email" value="<?=e(setting('printer_email'))?>" placeholder="printer@print.epsonconnect.com">
-                <small>Approved jobs are emailed with the attachment only (no body sheet printed).</small>
+                <small>Approved jobs are emailed directly to this printer address.</small>
             </label>
 
-            <button class="button button-admin">Save printer settings</button>
-        </form>
-    </section>
-
-    <!-- Epson Auto-Completion Mailbox (IMAP) -->
-    <section class="settings-card">
-        <div class="settings-heading">
-            <span class="settings-icon blue">✓</span>
-            <div>
-                <h2>Epson Print Auto-Completion Sync</h2>
-                <p>Reads confirmation emails sent by Epson Connect to mark finished jobs as Completed.</p>
-            </div>
-        </div>
-        <form method="post" class="settings-form">
-            <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
-            <input type="hidden" name="section" value="imap">
-
             <div class="field-row">
-                <label>IMAP Host
-                    <input name="imap_host" type="text" value="<?=e(setting('imap_host', setting('mail_host')) ?: 'imap.gmail.com')?>" placeholder="imap.gmail.com">
-                </label>
-                <label>IMAP Port
-                    <input name="imap_port" type="number" min="1" max="65535" value="<?=e(setting('imap_port', '993'))?>" placeholder="993">
-                </label>
-            </div>
-
-            <div class="field-row">
-                <label>IMAP Username (Sender inbox)
-                    <input name="imap_username" type="text" value="<?=e(setting('imap_username', setting('mail_username')))?>" placeholder="printer-sender@example.com">
-                </label>
-                <label>Encryption
-                    <select name="imap_encryption">
-                        <?php $enc = strtolower(setting('imap_encryption', 'ssl')); ?>
-                        <option value="ssl" <?=$enc === 'ssl' ? 'selected' : ''?>>SSL (Port 993)</option>
-                        <option value="tls" <?=$enc === 'tls' ? 'selected' : ''?>>TLS</option>
-                        <option value="none" <?=$enc === 'none' ? 'selected' : ''?>>None (Plain / Port 143)</option>
+                <label>Automatic Job Completion
+                    <select name="auto_complete_mode">
+                        <?php $m = setting('auto_complete_mode', 'timer'); ?>
+                        <option value="timer" <?=$m === 'timer' ? 'selected' : ''?>>Auto-complete after estimated print duration (Recommended)</option>
+                        <option value="immediate" <?=$m === 'immediate' ? 'selected' : ''?>>Auto-complete immediately upon email dispatch</option>
+                        <option value="manual" <?=$m === 'manual' ? 'selected' : ''?>>Only complete via Epson email response or manual check</option>
                     </select>
                 </label>
+                <label>Estimated print time (minutes)
+                    <input name="auto_complete_minutes" type="number" min="1" max="60" value="<?=e(setting('auto_complete_minutes', '2'))?>">
+                </label>
             </div>
 
-            <label>IMAP Password / App Password
-                <input name="imap_password" type="password" placeholder="<?=setting('imap_password', setting('mail_password')) ? '•••••••• (leave blank to keep current)' : 'Enter IMAP mailbox password'?>">
-            </label>
-
-            <button class="button button-admin">Save &amp; Test mailbox sync</button>
+            <button class="button button-admin">Save printer settings</button>
         </form>
     </section>
 
@@ -189,7 +174,7 @@ page_title('Settings Management', 'Configure printer delivery, auto-completion, 
             <span class="settings-icon violet">✉</span>
             <div>
                 <h2>SMTP Mail Settings</h2>
-                <p>Connect an authenticated SMTP server for reliable system notices, user passwords, and Epson dispatch.</p>
+                <p>Outgoing email server for sending files to Epson and client notices.</p>
             </div>
         </div>
         <form method="post" class="settings-form">
@@ -218,9 +203,9 @@ page_title('Settings Management', 'Configure printer delivery, auto-completion, 
                 <label>Encryption
                     <select name="mail_encryption">
                         <?php $enc = strtolower(setting('mail_encryption', 'tls')); ?>
-                        <option value="tls" <?=$enc === 'tls' ? 'selected' : ''?>>TLS (Recommended, port 587)</option>
+                        <option value="tls" <?=$enc === 'tls' ? 'selected' : ''?>>TLS (Port 587)</option>
                         <option value="ssl" <?=$enc === 'ssl' ? 'selected' : ''?>>SSL (Port 465)</option>
-                        <option value="none" <?=$enc === 'none' ? 'selected' : ''?>>None (Plain / Port 25)</option>
+                        <option value="none" <?=$enc === 'none' ? 'selected' : ''?>>None (Port 25)</option>
                     </select>
                 </label>
                 <label>SMTP Username
@@ -236,13 +221,57 @@ page_title('Settings Management', 'Configure printer delivery, auto-completion, 
         </form>
     </section>
 
+    <!-- IMAP Mailbox Settings (Optional for Printer Feedback) -->
+    <section class="settings-card">
+        <div class="settings-heading">
+            <span class="settings-icon blue">📥</span>
+            <div>
+                <h2>IMAP Inbox Settings (Optional)</h2>
+                <p>Read incoming Epson error and completion emails directly from your mailbox.</p>
+            </div>
+        </div>
+        <form method="post" class="settings-form">
+            <input type="hidden" name="csrf" value="<?=e(csrf_token())?>">
+            <input type="hidden" name="section" value="imap">
+
+            <div class="field-row">
+                <label>IMAP Host
+                    <input name="imap_host" type="text" value="<?=e(setting('imap_host', setting('mail_host', '')) )?>" placeholder="imap.gmail.com or mail.example.com">
+                </label>
+                <label>IMAP Port
+                    <input name="imap_port" type="number" min="1" max="65535" value="<?=e(setting('imap_port', '993'))?>" placeholder="993">
+                </label>
+            </div>
+
+            <div class="field-row">
+                <label>Encryption
+                    <select name="imap_encryption">
+                        <?php $iEnc = strtolower(setting('imap_encryption', 'ssl')); ?>
+                        <option value="ssl" <?=$iEnc === 'ssl' ? 'selected' : ''?>>SSL (Port 993)</option>
+                        <option value="tls" <?=$iEnc === 'tls' ? 'selected' : ''?>>TLS (Port 143)</option>
+                        <option value="none" <?=$iEnc === 'none' ? 'selected' : ''?>>None</option>
+                    </select>
+                </label>
+                <label>IMAP Username
+                    <input name="imap_username" type="text" value="<?=e(setting('imap_username', setting('mail_username', '')) )?>" placeholder="user@example.com">
+                </label>
+            </div>
+
+            <label>IMAP Password
+                <input name="imap_password" type="password" placeholder="<?=setting('imap_password') ? '•••••••• (leave blank to keep current password)' : 'Enter IMAP password'?>">
+            </label>
+
+            <button class="button button-admin">Save IMAP settings</button>
+        </form>
+    </section>
+
     <!-- SQL Database Info -->
     <section class="settings-card">
         <div class="settings-heading">
             <span class="settings-icon blue">⌘</span>
             <div>
                 <h2>SQL Database settings</h2>
-                <p>Connection credentials are set by the server, not stored in the portal.</p>
+                <p>Connection credentials are set by the server environment variables.</p>
             </div>
         </div>
         <div class="db-env-list">

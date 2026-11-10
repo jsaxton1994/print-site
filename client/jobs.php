@@ -12,6 +12,7 @@ if (!in_array($filter, $allowed, true)) {
 $paperOptions  = ['A4', 'A3', 'Letter', 'Legal', '4x6'];
 $colourOptions = ['Colour', 'Black & White'];
 $allowClientSettings = setting('allow_client_settings', '1') === '1';
+$maxAttachmentsLimit = max(1, (int)setting('max_attachments_limit', '10'));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf();
@@ -26,8 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('/client/jobs.php#new-job');
         }
 
-        if (!$count || $count > 15) {
-            flash('error', 'Choose between 1 and 15 files per submission.');
+        if (!$count || $count > $maxAttachmentsLimit) {
+            flash('error', "Choose between 1 and {$maxAttachmentsLimit} file" . ($maxAttachmentsLimit === 1 ? '' : 's') . ' per submission.');
             redirect('/client/jobs.php#new-job');
         }
 
@@ -224,7 +225,7 @@ page_title('Job Management', 'Your files, from submission through to collection.
         <a class="modal-close" href="/client/jobs.php">×</a>
         <div class="eyebrow">NEW REQUEST</div>
         <h2>Send to print</h2>
-        <p class="muted">Upload up to 15 files. Each file becomes an individual job.</p>
+        <p class="muted">Upload up to <?= (int)$maxAttachmentsLimit ?> file<?= $maxAttachmentsLimit === 1 ? '' : 's' ?>. Each file becomes an individual job.</p>
 
         <form method="post" enctype="multipart/form-data" class="form-stack">
             <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
@@ -233,8 +234,8 @@ page_title('Job Management', 'Your files, from submission through to collection.
             <label class="upload-zone">
                 <span class="upload-glyph">↑</span>
                 <strong>Choose documents to upload</strong>
-                <small>PDF, images, Office · 25 MB max per file</small>
-                <input type="file" name="documents[]" id="documents" multiple required>
+                <small>PDF, images, Office · Max <?= (int)$maxAttachmentsLimit ?> files (25 MB max per file)</small>
+                <input type="file" name="documents[]" id="documents" multiple required onchange="if(this.files.length > <?= (int)$maxAttachmentsLimit ?>){ alert('You can only upload a maximum of <?= (int)$maxAttachmentsLimit ?> files per submission.'); this.value=''; }">
             </label>
 
             <?php if ($allowClientSettings): ?>

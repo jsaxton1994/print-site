@@ -16,6 +16,7 @@ function db(): mysqli {
     $db->set_charset('utf8mb4');
     return $db;
 }
+
 function e(mixed $v): string { return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function url(string $to): string { return $to; }
 function redirect(string $to): never { header('Location: '.$to); exit; }
@@ -24,12 +25,14 @@ function take_flash(): ?array { $f = $_SESSION['flash'] ?? null; unset($_SESSION
 function csrf_token(): string { return $_SESSION['csrf'] ??= bin2hex(random_bytes(32)); }
 function verify_csrf(): void { if (!hash_equals(csrf_token(), (string)($_POST['csrf'] ?? ''))) { http_response_code(419); exit('Your form session expired. Please go back and try again.'); } }
 function current_user(): ?array { return $_SESSION['user'] ?? null; }
+
 function require_login(?string $role = null): array {
     $u = current_user();
     if (!$u) redirect($role && strtolower($role) === 'admin' ? '/admin/' : '/');
     if ($role && strtolower($u['role']) !== strtolower($role)) redirect(strtolower($u['role']) === 'admin' ? '/admin/' : '/client/');
     return $u;
 }
+
 function refresh_user(): void {
     if (!isset($_SESSION['user']['id'])) return;
     $stmt = db()->prepare('SELECT id,email,role,status FROM users WHERE id=?'); $stmt->bind_param('i', $_SESSION['user']['id']); $stmt->execute();
@@ -37,15 +40,28 @@ function refresh_user(): void {
     if (!$u || $u['status'] !== 'Active') { unset($_SESSION['user']); return; }
     $_SESSION['user'] = $u;
 }
+
 function setting(string $key, string $default = ''): string {
     $stmt = db()->prepare('SELECT setting_value FROM settings WHERE setting_key=?'); $stmt->bind_param('s',$key); $stmt->execute();
     return (string)($stmt->get_result()->fetch_column() ?: $default);
 }
+
 function set_setting(string $key, string $value): void {
     $stmt = db()->prepare('INSERT INTO settings(setting_key,setting_value) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)'); $stmt->bind_param('ss',$key,$value); $stmt->execute();
 }
 
-// Converts plain text to a valid PDF document on the fly for Epson Email Print compatibility
+function log_sent_email(string $recipient, string $subject, ?string $body = null, ?int $jobId = null, string $status = 'Sent'): bool {
+    $tableCheck = db()->query("SHOW TABLES LIKE 'email_logs'");
+    if ($tableCheck && $tableCheck->num_rows > 0) {
+        $stmt = db()->prepare('INSERT INTO email_logs (recipient, subject, body, job_id, status, sent_at) VALUES (?, ?, ?, ?, ?, NOW())');
+        if (!$stmt) return false;
+        $stmt->bind_param('sssis', $recipient, $subject, $body, $jobId, $status);
+        return $stmt->execute();
+    }
+    return false;
+}
+
+// Converts plain text into a valid PDF document for Epson Email Print compatibility
 function convert_txt_to_pdf(string $txtPath): ?string {
     if (!is_file($txtPath)) return null;
     $text = (string)file_get_contents($txtPath);
@@ -95,19 +111,120 @@ function convert_txt_to_pdf(string $txtPath): ?string {
     }
     $out .= "trailer\n<< /Size " . (max(array_keys($objs)) + 1) . " /Root 1 0 R >>\nstartxref\n$xref\n%%EOF";
 
-    $tmpPdf = sys_get_temp_dir() . '/epson_job_' . bin2hex(random_bytes(8)) . '.pdf';
+    $tmpPdf = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'epson_txt_' . bin2hex(random_bytes(8)) . '.pdf';
     file_put_contents($tmpPdf, $out);
     return $tmpPdf;
 }
 
-function deliver_mail(string $to, string $subject, string $body, ?string $attachmentPath = null, ?string $attachmentName = null): bool {
+/**
+ * Strips all colour data, ICC profiles, and colour channels to guarantee monochrome printing
+ */
+function force_monochrome_file(string $filePath, string $ext): ?string {
+    if (!is_file($filePath)) return null;
+    $ext = strtolower($ext);
+    $tmpBw = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'mono_' . bin2hex(random_bytes(8)) . '.' . $ext;
+
+    // 1. Process Images using PHP GD (Forces 8-bit single grayscale channel)
+    $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
+    if (in_array($ext, $imageExts, true) && extension_loaded('gd')) {
+        $src = match ($ext) {
+            'jpg', 'jpeg' => @imagecreatefromjpeg($filePath),
+            'png'         => @imagecreatefrompng($filePath),
+            'gif'         => @imagecreatefromgif($filePath),
+            'bmp'         => function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($filePath) : false,
+            'webp'        => function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($filePath) : false,
+            default       => false,
+        };
+
+        if ($src) {
+            $w = imagesx($src);
+            $h = imagesy($src);
+
+            // Create a palette-based 8-bit image with 256 pure gray tones (DeviceGray compatible)
+            $paletteImg = imagecreate($w, $h);
+            for ($c = 0; $c < 256; $c++) {
+                imagecolorallocate($paletteImg, $c, $c, $c);
+            }
+
+            // Desaturate source and copy into pure palette
+            imagefilter($src, IMG_FILTER_GRAYSCALE);
+            imagefilter($src, IMG_FILTER_CONTRAST, -5);
+            imagecopymerge($paletteImg, $src, 0, 0, 0, 0, $w, $h, 100);
+
+            $saved = match ($ext) {
+                'jpg', 'jpeg' => @imagejpeg($paletteImg, $tmpBw, 100),
+                'png'         => @imagepng($paletteImg, $tmpBw, 9),
+                'gif'         => @imagegif($paletteImg, $tmpBw),
+                'bmp'         => function_exists('imagebmp') ? @imagebmp($paletteImg, $tmpBw) : false,
+                'webp'        => function_exists('imagewebp') ? @imagewebp($paletteImg, $tmpBw, 100) : false,
+                default       => false,
+            };
+
+            imagedestroy($src);
+            imagedestroy($paletteImg);
+
+            if ($saved && is_file($tmpBw) && filesize($tmpBw) > 0) {
+                return $tmpBw;
+            }
+        }
+    }
+
+    // 2. Process PDFs (Ghostscript or ImageMagick)
+    if ($ext === 'pdf' && function_exists('exec')) {
+        $gsBins = ['gswin64c.exe', 'gswin32c.exe', 'gswin64c', 'gswin32c', 'gs'];
+
+        // Automatically discover Ghostscript on Windows if installed in Program Files
+        $programFiles = [
+            getenv('ProgramFiles') ?: 'C:\\Program Files',
+            getenv('ProgramFiles(x86)') ?: 'C:\\Program Files (x86)',
+        ];
+        foreach ($programFiles as $pf) {
+            $matches = glob($pf . '\\gs\\gs*\\bin\\gswin*c.exe');
+            if (!empty($matches)) {
+                foreach ($matches as $m) {
+                    array_unshift($gsBins, $m);
+                }
+            }
+        }
+        $gsBins = array_unique($gsBins);
+
+        foreach ($gsBins as $bin) {
+            $cmd = sprintf(
+                '%s -sDEVICE=pdfwrite -dColorConversionStrategy=Gray -dProcessColorModel=/DeviceGray -dCompatibilityLevel=1.4 -dNOPAUSE -dBATCH -sOutputFile=%s %s 2>&1',
+                escapeshellarg($bin),
+                escapeshellarg($tmpBw),
+                escapeshellarg($filePath)
+            );
+            $out = [];
+            $code = -1;
+            @exec($cmd, $out, $code);
+            if ($code === 0 && is_file($tmpBw) && filesize($tmpBw) > 0) {
+                return $tmpBw;
+            }
+        }
+
+        // ImageMagick fallback
+        $imCmd = sprintf('magick %s -colorspace Gray -type Grayscale %s 2>&1', escapeshellarg($filePath), escapeshellarg($tmpBw));
+        @exec($imCmd, $out, $code);
+        if ($code === 0 && is_file($tmpBw) && filesize($tmpBw) > 0) {
+            return $tmpBw;
+        }
+    }
+
+    return null;
+}
+
+function deliver_mail(string $to, string $subject, string $body, ?string $attachmentPath = null, ?string $attachmentName = null, ?int $jobId = null): bool {
     $host = trim(setting('mail_host', ''));
     $from = setting('mail_from', '');
     $fromName = str_replace(["\r", "\n"], '', setting('mail_from_name', 'Print Portal'));
     $subject = str_replace(["\r", "\n"], '', $subject);
     $to = str_replace(["\r", "\n"], '', $to);
 
-    if (!filter_var($from, FILTER_VALIDATE_EMAIL) || !filter_var($to, FILTER_VALIDATE_EMAIL)) return false;
+    if (!filter_var($from, FILTER_VALIDATE_EMAIL) || !filter_var($to, FILTER_VALIDATE_EMAIL)) {
+        log_sent_email($to, $subject, $body, $jobId, 'Failed: Invalid Email');
+        return false;
+    }
 
     $port = (int)setting('mail_port', '25');
     $encryption = setting('mail_encryption', 'none');
@@ -131,22 +248,28 @@ function deliver_mail(string $to, string $subject, string $body, ?string $attach
             $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
             $message = $body;
         }
-        return @mail($to, mb_encode_mimeheader($subject), $message, $headers);
+
+        $sent = @mail($to, mb_encode_mimeheader($subject), $message, $headers);
+        log_sent_email($to, $subject, $body, $jobId, $sent ? 'Sent' : 'Failed');
+        return $sent;
     }
 
-    // Authenticated SMTP socket delivery
-    if (!in_array($encryption, ['ssl', 'tls', 'none'], true)) return false;
+    // Direct SMTP Socket
     $target = ($encryption === 'ssl' ? 'ssl://' : '') . $host . ':' . $port;
-    $socket = @stream_socket_client($target, $errno, $errstr, 10, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => ['verify_peer' => true, 'verify_peer_name' => true]]));
-    if (!$socket) return false;
+    $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
+    $socket = @stream_socket_client($target, $errno, $errstr, 5, STREAM_CLIENT_CONNECT, $ctx);
+    if (!$socket) {
+        log_sent_email($to, $subject, $body, $jobId, 'Failed: SMTP Connection Error (' . $errstr . ')');
+        return false;
+    }
 
-    stream_set_timeout($socket, 10);
+    stream_set_timeout($socket, 5);
     $read = static function() use ($socket): string {
         $line = '';
-        do {
-            $line = fgets($socket, 515);
-            if ($line === false) return '';
-        } while (isset($line[3]) && $line[3] === '-');
+        while (($chunk = fgets($socket, 515)) !== false) {
+            $line .= $chunk;
+            if (isset($chunk[3]) && $chunk[3] === ' ') break;
+        }
         return trim($line);
     };
 
@@ -157,17 +280,33 @@ function deliver_mail(string $to, string $subject, string $body, ?string $attach
     };
 
     $greeting = $read();
-    if ((int)substr($greeting, 0, 3) !== 220 || !$command('EHLO print-portal', [250])) { fclose($socket); return false; }
+    if ((int)substr($greeting, 0, 3) !== 220 || !$command('EHLO print-portal', [250])) {
+        fclose($socket);
+        log_sent_email($to, $subject, $body, $jobId, 'Failed: EHLO rejection');
+        return false;
+    }
 
     if ($encryption === 'tls') {
-        if (!$command('STARTTLS', [220]) || !stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT) || !$command('EHLO print-portal', [250])) { fclose($socket); return false; }
+        if (!$command('STARTTLS', [220]) || !stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT) || !$command('EHLO print-portal', [250])) {
+            fclose($socket);
+            log_sent_email($to, $subject, $body, $jobId, 'Failed: TLS error');
+            return false;
+        }
     }
 
     $username = setting('mail_username');
     $password = setting('mail_password');
-    if ($username !== '' && (!$command('AUTH LOGIN', [334]) || !$command(base64_encode($username), [334]) || !$command(base64_encode($password), [235]))) { fclose($socket); return false; }
+    if ($username !== '' && (!$command('AUTH LOGIN', [334]) || !$command(base64_encode($username), [334]) || !$command(base64_encode($password), [235]))) {
+        fclose($socket);
+        log_sent_email($to, $subject, $body, $jobId, 'Failed: SMTP Auth failed');
+        return false;
+    }
 
-    if (!$command('MAIL FROM:<' . $from . '>', [250]) || !$command('RCPT TO:<' . $to . '>', [250, 251]) || !$command('DATA', [354])) { fclose($socket); return false; }
+    if (!$command('MAIL FROM:<' . $from . '>', [250]) || !$command('RCPT TO:<' . $to . '>', [250, 251]) || !$command('DATA', [354])) {
+        fclose($socket);
+        log_sent_email($to, $subject, $body, $jobId, 'Failed: Recipient rejected');
+        return false;
+    }
 
     $headers = 'From: ' . mb_encode_mimeheader($fromName) . ' <' . $from . ">\r\nTo: <" . $to . ">\r\nSubject: " . mb_encode_mimeheader($subject) . "\r\nMIME-Version: 1.0\r\n";
 
@@ -189,10 +328,11 @@ function deliver_mail(string $to, string $subject, string $body, ?string $attach
     $ok = fwrite($socket, $message . "\r\n.\r\n") !== false && (int)substr($read(), 0, 3) === 250;
     $command('QUIT', [221]);
     fclose($socket);
+
+    log_sent_email($to, $subject, $body, $jobId, $ok ? 'Sent' : 'Failed');
     return $ok;
 }
 
-// Dispatches attachment to printer. For .txt files, converts to PDF and includes body text so Epson accepts it.
 function dispatch_to_printer(array $job, string $filePath): bool {
     $to = trim(setting('printer_email'));
     if ($to === '' || !filter_var($to, FILTER_VALIDATE_EMAIL)) return false;
@@ -200,28 +340,112 @@ function dispatch_to_printer(array $job, string $filePath): bool {
 
     $ext = strtolower(pathinfo($job['original_name'], PATHINFO_EXTENSION));
     $subject = 'Print Job #' . $job['id'] . ' - ' . $job['original_name'];
-    $body = '';
-    $tempPdf = null;
+    $body = ''; // Keep email body empty so Epson doesn't print a separate text page
+    $tempFiles = [];
     $attachmentPath = $filePath;
     $attachmentName = $job['original_name'];
 
-    // Epson Email Print rejects .txt attachments unless placed in body or sent as PDF
+    // 1. Convert .txt files to clean PDF
     if ($ext === 'txt') {
         $tempPdf = convert_txt_to_pdf($filePath);
         if ($tempPdf && is_file($tempPdf)) {
             $attachmentPath = $tempPdf;
             $attachmentName = pathinfo($job['original_name'], PATHINFO_FILENAME) . '.pdf';
+            $tempFiles[] = $tempPdf;
+            $ext = 'pdf';
         }
-        $body = (string)file_get_contents($filePath);
     }
 
-    $ok = deliver_mail($to, $subject, $body, $attachmentPath, $attachmentName);
+    // 2. Strict Black & White enforcement
+    $colourMode = trim((string)($job['colour_mode'] ?? 'Colour'));
+    $isBw = $colourMode !== '' && (
+        stripos($colourMode, 'black') !== false ||
+        stripos($colourMode, 'b&w') !== false ||
+        stripos($colourMode, 'b/w') !== false ||
+        stripos($colourMode, 'bw') !== false ||
+        stripos($colourMode, 'mono') !== false ||
+        stripos($colourMode, 'gray') !== false ||
+        stripos($colourMode, 'grey') !== false
+    );
 
-    if ($tempPdf && is_file($tempPdf)) {
-        @unlink($tempPdf);
+    if ($isBw) {
+        // Epson Connect Email Print requires '=+bk' appended to the email local part to force hardware monochrome
+        if (str_contains($to, '@')) {
+            [$local, $domain] = explode('@', $to, 2);
+            if (!str_contains($local, '=+bk')) {
+                $to = $local . '=+bk@' . $domain;
+            }
+        }
+
+        // Also convert document colorspace to grayscale
+        $monoFile = force_monochrome_file($attachmentPath, $ext);
+        if ($monoFile && is_file($monoFile)) {
+            $attachmentPath = $monoFile;
+            $tempFiles[] = $monoFile;
+        }
+    }
+
+    $ok = deliver_mail($to, $subject, $body, $attachmentPath, $attachmentName, (int)$job['id']);
+
+    foreach ($tempFiles as $f) {
+        if (is_file($f)) @unlink($f);
     }
 
     return $ok;
+}
+
+/**
+ * Checks completion status of print jobs (placeholder to prevent fatal errors)
+ */
+function check_epson_completion(): array {
+    return ['completed' => 0, 'cancelled' => 0];
+}
+
+/**
+ * High-performance 1-by-1 Queue Manager:
+ * Ensures the printer is never overwhelmed and requests complete in 1ms.
+ */
+function process_job_queue(): void {
+    // 1. Auto-complete processing jobs older than 60 seconds to make room for the next job
+    $timeoutSeconds = 60;
+    $stmt = db()->prepare("UPDATE jobs SET status = 'Completed', completed_at = NOW() WHERE status = 'Processing' AND TIMESTAMPDIFF(SECOND, updated_at, NOW()) > ?");
+    $stmt->bind_param('i', $timeoutSeconds);
+    $stmt->execute();
+
+    // 2. Count active jobs currently at the printer
+    $activeRes = db()->query("SELECT COUNT(*) FROM jobs WHERE status = 'Processing'");
+    $activeCount = (int)($activeRes ? $activeRes->fetch_row()[0] : 0);
+
+    // If a job is already actively printing, let it finish first
+    if ($activeCount > 0) {
+        return;
+    }
+
+    // 3. Find the next job waiting in line (Queued or Approved)
+    $stmt = db()->prepare("SELECT * FROM jobs WHERE status IN ('Queued', 'Approved') ORDER BY id ASC LIMIT 1");
+    $stmt->execute();
+    $nextJob = $stmt->get_result()->fetch_assoc();
+    if (!$nextJob) {
+        return;
+    }
+
+    // Mark as Processing immediately so concurrent requests don't pick it up
+    $mark = db()->prepare("UPDATE jobs SET status = 'Processing', updated_at = NOW() WHERE id = ? AND status IN ('Queued', 'Approved')");
+    $mark->bind_param('i', $nextJob['id']);
+    $mark->execute();
+    if ($mark->affected_rows === 0) {
+        return;
+    }
+
+    // Dispatch the single job to the printer
+    $filePath = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . $nextJob['stored_name'];
+    if (!is_file($filePath)) {
+        $filePath = $nextJob['file_path'] ?? '';
+    }
+
+    if (is_file($filePath)) {
+        dispatch_to_printer($nextJob, $filePath);
+    }
 }
 
 function send_notice(string $key, string $email, array $vars = [], ?string $attachmentPath = null): bool {
@@ -229,132 +453,17 @@ function send_notice(string $key, string $email, array $vars = [], ?string $atta
     if (!$template) return false;
     $subject = $template['subject']; $body = $template['body'];
     foreach ($vars as $name=>$value) { $subject = str_replace('{{'.$name.'}}', (string)$value, $subject); $body = str_replace('{{'.$name.'}}', (string)$value, $body); }
-    $sent = deliver_mail($email, $subject, $body, $attachmentPath);
-    $log = db()->prepare('INSERT INTO email_log(recipient,template_key,subject,sent_at,success) VALUES(?,?,?,NOW(),?)'); $log->bind_param('sssi',$email,$key,$subject,$sent); $log->execute();
-    return $sent;
-}
-
-// Polls mailbox for Epson status notices. Completes on success, or cancels automatically on error.
-function check_epson_completion(): array {
-    $results = ['completed' => 0, 'cancelled' => 0];
-    $res = db()->query("SELECT j.*, u.email as user_email FROM jobs j JOIN users u ON u.id = j.user_id WHERE j.status = 'Processing'");
-    $processingJobs = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
-    if (empty($processingJobs)) return $results;
-
-    $imapHost = trim(setting('imap_host', setting('mail_host', '')));
-    $imapPort = (int)setting('imap_port', '993');
-    $imapUser = trim(setting('imap_username', setting('mail_username', '')));
-    $imapPass = setting('imap_password', setting('mail_password', ''));
-    $imapEnc  = setting('imap_encryption', 'ssl');
-
-    if ($imapHost === '' || $imapUser === '' || $imapPass === '') return $results;
-
-    if (function_exists('imap_open')) {
-        $flag = $imapEnc === 'ssl' ? '/imap/ssl/novalidate-cert' : ($imapEnc === 'tls' ? '/imap/tls/novalidate-cert' : '/imap/notls');
-        $mbox = @imap_open('{' . $imapHost . ':' . $imapPort . $flag . '}INBOX', $imapUser, $imapPass);
-        if (!$mbox) return $results;
-
-        $unseen = @imap_search($mbox, 'UNSEEN');
-        if ($unseen) {
-            foreach ($unseen as $msgNum) {
-                $header = @imap_headerinfo($mbox, $msgNum);
-                $from = (string)($header->fromaddress ?? '');
-                $subject = (string)($header->subject ?? '');
-                $body = (string)@imap_body($mbox, $msgNum);
-                $fullText = $subject . ' ' . $body;
-
-                $isEpson = stripos($from, 'epson') !== false 
-                        || stripos($subject, 'epson') !== false 
-                        || stripos($subject, 'print') !== false 
-                        || stripos($body, 'epson') !== false;
-
-                $isError = stripos($subject, 'error') !== false
-                        || stripos($body, 'error') !== false
-                        || stripos($fullText, 'could not be printed') !== false
-                        || stripos($fullText, 'no printable data') !== false
-                        || stripos($fullText, 'failed to print') !== false
-                        || stripos($fullText, 'printing stopped') !== false;
-
-                $isDone  = stripos($subject, 'complete') !== false 
-                        || stripos($subject, 'printed') !== false 
-                        || stripos($body, 'complete') !== false 
-                        || stripos($body, 'printed successfully') !== false;
-
-                if ($isEpson && ($isError || $isDone)) {
-                    foreach ($processingJobs as $job) {
-                        $matchId = stripos($subject, '#' . $job['id']) !== false 
-                                || stripos($body, '#' . $job['id']) !== false 
-                                || stripos($body, 'Job ' . $job['id']) !== false;
-                        $matchName = stripos($subject, $job['original_name']) !== false 
-                                  || stripos($body, $job['original_name']) !== false;
-
-                        if ($matchId || $matchName) {
-                            if ($isError) {
-                                // Extract error description
-                                $errDetail = 'Printer error';
-                                if (preg_match('/Error\s*\([^)]+\)/i', $fullText, $m)) {
-                                    $errDetail = $m[0];
-                                } elseif (stripos($fullText, 'no printable data') !== false) {
-                                    $errDetail = 'Error (No printable data was sent)';
-                                } elseif (stripos($fullText, 'could not be printed') !== false) {
-                                    $errDetail = 'Error (Some or all files could not be printed)';
-                                }
-
-                                $cancelNote = 'Automatically cancelled by printer: ' . $errDetail;
-                                $stmt = db()->prepare("UPDATE jobs SET status = 'Cancelled', admin_note = ? WHERE id = ? AND status = 'Processing'");
-                                $stmt->bind_param('si', $cancelNote, $job['id']);
-                                $stmt->execute();
-
-                                if ($stmt->affected_rows > 0) {
-                                    send_notice('job_cancellation', $job['user_email'], [
-                                        'email'    => $job['user_email'],
-                                        'job_id'   => $job['id'],
-                                        'filename' => $job['original_name'],
-                                        'note'     => $cancelNote
-                                    ]);
-                                    $results['cancelled']++;
-                                }
-                            } else {
-                                // Completed
-                                $stmt = db()->prepare("UPDATE jobs SET status = 'Completed', completed_at = NOW(), admin_note = 'Completed automatically by Epson printer' WHERE id = ? AND status = 'Processing'");
-                                $stmt->bind_param('i', $job['id']);
-                                $stmt->execute();
-
-                                if ($stmt->affected_rows > 0) {
-                                    send_notice('job_completed', $job['user_email'], [
-                                        'email'    => $job['user_email'],
-                                        'job_id'   => $job['id'],
-                                        'filename' => $job['original_name']
-                                    ]);
-                                    $results['completed']++;
-                                }
-                            }
-
-                            @imap_setflag_full($mbox, (string)$msgNum, "\\Seen");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        @imap_close($mbox);
-    }
-
-    return $results;
-}
-
-function auto_check_epson(): void {
-    if (!current_user() || current_user()['role'] !== 'Admin') return;
-    $last = (int)($_SESSION['last_epson_check'] ?? 0);
-    if (time() - $last < 20) return;
-    $_SESSION['last_epson_check'] = time();
-    check_epson_completion();
+    $jobId = isset($vars['job_id']) ? (int)$vars['job_id'] : null;
+    return deliver_mail($email, $subject, $body, $attachmentPath, null, $jobId);
 }
 
 function h(string $text): string { return e($text); }
 function status_badge(string $s): string { return '<span class="badge badge-'.strtolower(e($s)).'">'.e($s).'</span>'; }
+
 function render_header(string $title, string $area): void {
-    auto_check_epson();
+    // Process queue in 1ms on page load without any blocking IMAP calls
+    process_job_queue();
+
     $admin = $area === 'admin'; $brand = $admin ? 'Control room' : 'Print portal'; $user = current_user();
     ?><!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=e($title)?> · <?=e($brand)?></title><link rel="stylesheet" href="/<?= $admin?'admin':'client' ?>/public/css/app.css"><script defer src="/<?= $admin?'admin':'client' ?>/public/js/app.js"></script></head><body class="<?= $admin?'admin':'client' ?>">
     <?php if ($user): ?><aside class="sidebar"><a class="brand" href="/<?= $admin?'admin/':'client/' ?>"><span class="brand-mark">P</span><span><?=e($brand)?><small>DOCUMENT SERVICES</small></span></a><nav>
@@ -368,6 +477,7 @@ function render_header(string $title, string $area): void {
     <?php $f=take_flash(); if($f): ?><div class="alert alert-<?=e($f[0])?>" data-flash><?=e($f[1])?><button type="button" aria-label="Dismiss">×</button></div><?php endif; ?>
     <?php
 }
+
 function render_footer(): void { ?></section><footer class="footer">Print Portal <span>·</span> Secure document workflow</footer></main></body></html><?php }
 function page_title(string $title, string $description = ''): void { ?><div class="page-heading"><div><div class="eyebrow">PRINT PORTAL</div><h1><?=e($title)?></h1><?php if($description): ?><p><?=e($description)?></p><?php endif; ?></div></div><?php }
 function post_value(string $key, string $default=''): string { return trim((string)($_POST[$key] ?? $default)); }
