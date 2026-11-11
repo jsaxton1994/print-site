@@ -46,12 +46,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ((isset($files['error']) && in_array(UPLOAD_ERR_INI_SIZE, $files['error'], true)) || (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (400 * 1024 * 1024)) {
             flash('error', 'The upload is larger than the server limit. Submit fewer or smaller files.');
-            redirect('/client/jobs.php#new-job');
+            redirect('/client/jobs.php');
         }
 
         if (!$count || $count > $maxAttachmentsLimit) {
             flash('error', "Choose between 1 and {$maxAttachmentsLimit} file" . ($maxAttachmentsLimit === 1 ? '' : 's') . ' per submission.');
-            redirect('/client/jobs.php#new-job');
+            redirect('/client/jobs.php');
         }
 
         // Determine paper size from admin allowed options
@@ -163,10 +163,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($added) {
             flash('success', "{$added} print job" . ($added === 1 ? ' was' : 's were') . ' submitted. Each file has its own job.');
-            redirect('/client/index.php');
+            redirect('/client/jobs.php');
         } else {
             flash('error', 'No files were accepted. Use supported file types up to 25 MB each.');
-            redirect('/client/jobs.php#new-job');
+            redirect('/client/jobs.php');
         }
     }
 }
@@ -286,14 +286,14 @@ page_title('Job Management', 'Your files, from submission through to collection.
 </div>
 
 <!-- New Job Modal -->
-<div class="modal-backdrop" id="new-job">
+<div class="modal-backdrop" id="new-job" onclick="if(event.target===this) window.location.href='/client/jobs.php';">
     <div class="modal-card">
         <a class="modal-close" href="/client/jobs.php">×</a>
         <div class="eyebrow">NEW REQUEST</div>
         <h2>Send to print</h2>
         <p class="muted">Upload up to <?= (int)$maxAttachmentsLimit ?> file<?= $maxAttachmentsLimit === 1 ? '' : 's' ?>. Each file becomes an individual job.</p>
 
-        <form method="post" enctype="multipart/form-data" class="form-stack">
+        <form method="post" action="/client/jobs.php" enctype="multipart/form-data" class="form-stack" onsubmit="window.location.hash='';">
             <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
             <input type="hidden" name="upload_jobs" value="1">
 
@@ -337,5 +337,18 @@ page_title('Job Management', 'Your files, from submission through to collection.
         </form>
     </div>
 </div>
+
+<script>
+// Automatically clear the hash if returning from a submission so the modal view remains closed
+if (window.location.hash === '#new-job') {
+    const hasFlash = document.querySelector('.flash, .flash-message, .alert');
+    if (hasFlash) {
+        window.location.hash = '';
+        if (history.replaceState) {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    }
+}
+</script>
 
 <?php render_footer(); ?>
